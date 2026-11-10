@@ -2086,10 +2086,17 @@ local function drawNKMSceneLighting(viewSetup)
             error("NKM reconstructed buffers are not ready for this frame")
         end
 
+        // Refresh the scene copy before binding s3. screenspace_general only
+        // exposes BASETEXTURE and TEXTURE1..TEXTURE3 (samplers s0..s3).
+        render.UpdateScreenEffectTexture()
+        local sceneTexture = render.GetScreenEffectTexture()
+        if not sceneTexture then error("GMod screen-effect texture is unavailable") end
+
         local setters = {
+            { material.SetTexture, "$basetexture", NKM_GShaderWorldPosRT },
+            { material.SetTexture, "$texture1", NKM_GShaderNormalRT },
             { material.SetTexture, "$texture2", NKM.GShaderDynamicLightLUT },
-            { material.SetTexture, "$texture4", NKM_GShaderWorldPosRT },
-            { material.SetTexture, "$texture5", NKM_GShaderNormalRT },
+            { material.SetTexture, "$texture3", sceneTexture },
             { material.SetMatrix, "$viewprojmat", viewProjection },
             { material.SetFloat, "$c0_x", #pointLights },
             { material.SetFloat, "$c0_y", deferred.aoRadius or 72 },
@@ -2127,9 +2134,8 @@ local function drawNKMSceneLighting(viewSetup)
             if not succeeded then error(setError or ("failed to set " .. setter[2])) end
         end
 
-        -- One unmasked full-screen pass shades the nearest visible opaque GBuffer
-        -- surface, regardless of whether it came from Source BSP or NKM IMeshes.
-        render.UpdateScreenEffectTexture()
+        -- One unmasked full-screen pass shades visible NKM receiver pixels.
+        -- Source depth is not part of this four-sampler pass.
         resetNKMStencilState()
         render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
         render.SetMaterial(material)
@@ -2896,7 +2902,7 @@ concommand.Add("nkm_lighting_status", function()
         .. (NKM.GShaderLUTLastError and (" (" .. tostring(NKM.GShaderLUTLastError) .. ")") or ""))
     print("[NKM] Per-pixel lighting requested: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
         .. "; active: " .. tostring(NKM.GShaderPixelLighting == true))
-    print("[NKM] AO, ambient/directional and point lights use one unmasked full-screen opaque GBuffer pass.")
+    print("[NKM] NKM AO, ambient/directional and point lights use one unmasked full-screen pass (NKM-only receiver depth).")
 end)
 
 concommand.Add("nkm_gshader_lights", function()
