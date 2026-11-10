@@ -2576,11 +2576,32 @@ concommand.Add("nkm_gshader_debug_buffers", function(_, _, args)
         return
     end
 
-    if previous ~= (NKM.GShaderNKMBufferDebug == true)
-        and isfunction(NKM.RebuildBSPDisplacementRenderMeshes) then
-        local rebuilt, failed = NKM.RebuildBSPDisplacementRenderMeshes()
-        print(string.format("[NKM] Rebuilt render meshes for normal diagnostics: %d succeeded, %d failed",
-            rebuilt or 0, failed or 0))
+    if previous ~= (NKM.GShaderNKMBufferDebug == true) then
+        -- The previous rebuild helper only retained source vertices for BSP
+        -- displacements. Ordinary streamed NKM chunks had already discarded
+        -- their parsed vertex arrays, so their normalDebugMesh was never built.
+        -- Re-stream wanted chunks from the local cache (or server) with the
+        -- diagnostic flag active, causing buildChunkRenderMeshes to create it.
+        local requeued = 0
+        for _, chunk in ipairs(NKM.ClientChunks or {}) do
+            if chunk.loaded and chunk.wanted then
+                NKM.UnloadClientChunk(chunk)
+                chunk.cacheChecked = false
+                chunk.requestPending = false
+                chunk.retryAt = 0
+                requeued = requeued + 1
+            end
+        end
+
+        if requeued > 0 and isfunction(NKM.UpdateChunkStreaming) then
+            NKM.NextChunkUpdate = 0
+            NKM.NextChunkRequestAt = 0
+            NKM.UpdateChunkStreaming(true)
+        end
+
+        print(string.format(
+            "[NKM] Re-queued %d wanted chunks for normal diagnostics; they will rebuild from cache/network",
+            requeued))
     end
 
     print("[NKM] NKM GBuffer debug: " .. tostring(NKM.GShaderNKMBufferDebug == true))
