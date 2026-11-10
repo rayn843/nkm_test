@@ -2,12 +2,10 @@
 {
     "$pixshader" "nkm_deferred_lighting_ps30"
     "$vertexshader" "pp_vs30"
-    "$basetexture" "_rt_WPDepth"
-    "$texture1" "_rt_NormalsTangents"
+    "$basetexture" "_rt_NKM_WPDepth"
+    "$texture1" "_rt_NKM_Normals"
     "$texture2" "_rt_NKM_DynamicLights"
     "$texture3" "_rt_FullFrameFB"
-    "$texture4" "_rt_NKM_WPDepth"
-    "$texture5" "_rt_NKM_Normals"
 
     "<dx90>"
     {
