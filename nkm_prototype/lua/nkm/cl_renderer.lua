@@ -61,6 +61,13 @@ NKM.GShaderLUTLastError = nil
 NKM.GShaderLastError = nil
 NKM.GShaderLastHookAt = nil
 NKM.GShaderLastMaskDraws = 0
+NKM.GShaderNKMStaticPassCount = NKM.GShaderNKMStaticPassCount or 0
+NKM.GShaderGlobalPointPassCount = NKM.GShaderGlobalPointPassCount or 0
+NKM.GShaderPixelLighting = false
+local NKM_GShaderPixelLightingConVar = CreateClientConVar(
+    "nkm_gshader_pixel_lighting", "0", true, false,
+    "Use the rebuilt NKM GShader shader for per-pixel ambient/directional/static-point lighting."
+)
 
 local GSHADER_NKM_STENCIL_BIT = 128
 local GSHADER_MAX_DYNAMIC_LIGHTS = 32
@@ -264,13 +271,16 @@ local function buildChunkRenderMeshes(meshGroups, chunkID)
                 return nil, "could not create triangle-aligned mesh batch"
             end
 
-            local useBSPVertexLighting = isBSPDisplacement and NKM.ClientBSPDisplacementMaterialMode == "lit"
+            local useBSPVertexLighting = isBSPDisplacement
+                and NKM.ClientBSPDisplacementMaterialMode == "lit"
+                and NKM.GShaderPixelLighting ~= true
             local forceWhite = isBSPDisplacement and not useBSPVertexLighting
+            local useBakedNKMLighting = hasNKMLighting and NKM.GShaderPixelLighting ~= true
             for index = sourceIndex, batchEnd do
                 local value = source[index]
-                batch[#batch + 1] = makeMeshVertex(value, renderOffset, forceWhite, hasNKMLighting)
+                batch[#batch + 1] = makeMeshVertex(value, renderOffset, forceWhite, useBakedNKMLighting)
                 if blendBatch then
-                    local blendVertex = makeMeshVertex(value, renderOffset, forceWhite, hasNKMLighting)
+                    local blendVertex = makeMeshVertex(value, renderOffset, forceWhite, useBakedNKMLighting)
                     local color = blendVertex.color
                     color.a = math.Clamp(math.floor((value.blendAlpha or 255) + 0.5), 0, 255)
                     blendVertex.color = color
@@ -596,10 +606,15 @@ local function hasGShaderAPI()
         and isfunction(shaderlib.CanDrawEffects)
 end
 
+local getNKMDeferredMaterial
+
 local function setClientLightingSettings(lighting)
     local hasDeferredSettings = istable(lighting) and istable(lighting.deferred)
     local clean = {
         enabled = istable(lighting) and lighting.enabled ~= false,
+        shadows = not istable(lighting) or lighting.shadows ~= false,
+        ambient = { 32, 32, 32 },
+        directional = {},
         deferred = {
             ao = hasDeferredSettings and lighting.deferred.ao ~= false,
             contactShadows = hasDeferredSettings and lighting.deferred.contactShadows ~= false,
@@ -609,31 +624,74 @@ local function setClientLightingSettings(lighting)
         point = {}
     }
 
+    if istable(lighting) and istable(lighting.ambient) then
+        for channel = 1, 3 do
+            if isFiniteNumber(lighting.ambient[channel]) then
+                clean.ambient[channel] = math.Clamp(lighting.ambient[channel], 0, 255)
+            end
+        end
+    end
+
     if hasDeferredSettings then
         local deferred = lighting.deferred
         if isFiniteNumber(deferred.aoRadius) then clean.deferred.aoRadius = math.Clamp(deferred.aoRadius, 1, 512) end
         if isFiniteNumber(deferred.aoStrength) then clean.deferred.aoStrength = math.Clamp(deferred.aoStrength, 0, 1) end
     end
 
+    local pixelRequested = NKM_GShaderPixelLightingConVar:GetBool()
+    local pixelModeAvailable = clean.enabled and pixelRequested
+        and NKM.GShaderBridgeEnabled == true and hasGShaderAPI()
+        and getNKMDeferredMaterial() ~= nil
+    NKM.GShaderPixelLighting = pixelModeAvailable == true
+
+    if clean.enabled and istable(lighting.directional) then
+        for _, light in ipairs(lighting.directional) do
+            if #clean.directional >= (NKM.MaxLightingDirectionalLights or 4) then break end
+            if istable(light) and istable(light.direction) and istable(light.color)
+                and isFiniteNumber(light.direction[1]) and isFiniteNumber(light.direction[2]) and isFiniteNumber(light.direction[3])
+                and isFiniteNumber(light.color[1]) and isFiniteNumber(light.color[2]) and isFiniteNumber(light.color[3])
+                and isFiniteNumber(light.intensity or 1) then
+                local directionLengthSqr = light.direction[1] * light.direction[1]
+                    + light.direction[2] * light.direction[2] + light.direction[3] * light.direction[3]
+                if directionLengthSqr > 0.000001 then
+                    clean.directional[#clean.directional + 1] = {
+                        direction = { light.direction[1], light.direction[2], light.direction[3] },
+                        color = {
+                            math.Clamp(light.color[1], 0, 255),
+                            math.Clamp(light.color[2], 0, 255),
+                            math.Clamp(light.color[3], 0, 255)
+                        },
+                        intensity = math.Clamp(light.intensity or 1, 0, 8),
+                        shadows = light.shadows ~= false
+                    }
+                end
+            end
+        end
+    end
+
     if clean.enabled and istable(lighting.point) then
         for _, light in ipairs(lighting.point) do
             if #clean.point >= GSHADER_MAX_DYNAMIC_LIGHTS then break end
-            if istable(light) and istable(light.position) and istable(light.color)
-                and isFiniteNumber(light.position[1]) and isFiniteNumber(light.position[2]) and isFiniteNumber(light.position[3])
-                and isFiniteNumber(light.color[1]) and isFiniteNumber(light.color[2]) and isFiniteNumber(light.color[3])
-                and isFiniteNumber(light.radius) and light.radius > 0
-                and isFiniteNumber(light.intensity or 1) then
-                clean.point[#clean.point + 1] = {
-                    position = { light.position[1], light.position[2], light.position[3] },
-                    color = {
-                        math.Clamp(light.color[1], 0, 255),
-                        math.Clamp(light.color[2], 0, 255),
-                        math.Clamp(light.color[3], 0, 255)
-                    },
-                    radius = math.Clamp(light.radius, 1, 16384),
-                    intensity = math.Clamp(light.intensity or 1, 0, 8),
-                    shadows = light.shadows ~= false
-                }
+            -- Static point lights stay in the vertex bake until the matching VCS
+            -- is rebuilt and the user opts in; dynamic lights can use GShader now.
+            if pixelModeAvailable or light.dynamic == true then
+                if istable(light) and istable(light.position) and istable(light.color)
+                    and isFiniteNumber(light.position[1]) and isFiniteNumber(light.position[2]) and isFiniteNumber(light.position[3])
+                    and isFiniteNumber(light.color[1]) and isFiniteNumber(light.color[2]) and isFiniteNumber(light.color[3])
+                    and isFiniteNumber(light.radius) and light.radius > 0
+                    and isFiniteNumber(light.intensity or 1) then
+                    clean.point[#clean.point + 1] = {
+                        position = { light.position[1], light.position[2], light.position[3] },
+                        color = {
+                            math.Clamp(light.color[1], 0, 255),
+                            math.Clamp(light.color[2], 0, 255),
+                            math.Clamp(light.color[3], 0, 255)
+                        },
+                        radius = math.Clamp(light.radius, 1, 16384),
+                        intensity = math.Clamp(light.intensity or 1, 0, 8),
+                        shadows = clean.shadows and light.shadows ~= false
+                    }
+                end
             end
         end
     end
@@ -691,7 +749,7 @@ local function updateGShaderDynamicLightLUT()
     return true
 end
 
-local function getNKMDeferredMaterial()
+getNKMDeferredMaterial = function()
     if NKM.GShaderDeferredMaterial then
         local ok, isError = pcall(NKM.GShaderDeferredMaterial.IsError, NKM.GShaderDeferredMaterial)
         if ok and not isError then return NKM.GShaderDeferredMaterial end
@@ -712,14 +770,25 @@ local function getNKMDeferredMaterial()
     return material
 end
 
+local function hasNKMStaticDeferredLighting()
+    local lighting = NKM.ClientLighting
+    if not lighting or lighting.enabled ~= true then return false end
+    local deferred = lighting.deferred or {}
+    local hasAO = deferred.ao == true and (deferred.aoStrength or 0) > 0.0001
+    if hasAO then return true end
+    if NKM.GShaderPixelLighting ~= true then return false end
+    local ambient = lighting.ambient or {}
+    local hasAmbient = (ambient[1] or 0) > 0 or (ambient[2] or 0) > 0 or (ambient[3] or 0) > 0
+    return hasAmbient or #(lighting.directional or {}) > 0
+end
+
 local function shouldBuildGShaderMask()
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return false end
     if NKM.GShaderMaskDebug then return true end
     local lighting = NKM.ClientLighting
     if not lighting or lighting.enabled ~= true then return false end
-    local deferred = lighting.deferred or nil
-    local hasDeferredWork = #(NKM.ClientDynamicLights or {}) > 0 or (deferred and deferred.ao == true)
-    return hasDeferredWork and getNKMDeferredMaterial() ~= nil
+    local hasGlobalPointLights = #(NKM.ClientDynamicLights or {}) > 0
+    return hasNKMStaticDeferredLighting() or hasGlobalPointLights
 end
 
 local function resetNKMStencilState()
@@ -761,7 +830,7 @@ local function markVisibleNKMGeometry()
         render.SetStencilZFailOperation(STENCIL_KEEP)
         -- Keep the scene's depth test, but do not modify hardware depth while
         -- stamping the NKM-only stencil bit. Failed depth pixels stay unmarked.
-        render.OverrideDepthEnable(true, true)
+        render.OverrideDepthEnable(true, false)
         render.OverrideColorWriteEnable(true, false)
 
         for _, entry in ipairs(NKM.RenderMeshes) do
@@ -810,7 +879,7 @@ local function drawGShaderMaskDebug()
     resetNKMStencilState()
 end
 
-local function drawNKMDeferredLighting(viewSetup)
+local function drawNKMDeferredLighting(viewSetup, passName)
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return false end
     if not updateGShaderDynamicLightLUT() then return false end
 
@@ -823,42 +892,81 @@ local function drawNKMDeferredLighting(viewSetup)
         return false
     end
 
+    local isNKMPass = passName == "nkm"
     local lighting = NKM.ClientLighting or {}
     local deferred = lighting.deferred or {}
+    local pointLights = isNKMPass and {} or (NKM.ClientDynamicLights or {})
+    local ambient = isNKMPass and NKM.GShaderPixelLighting == true
+        and (lighting.ambient or { 32, 32, 32 }) or { 0, 0, 0 }
+    local directional = isNKMPass and NKM.GShaderPixelLighting == true
+        and (lighting.directional or {}) or {}
     local ok, err = pcall(function()
         local setters = {
             { material.SetMatrix, "$viewprojmat", viewProjection },
-            { material.SetFloat, "$c0_x", #(NKM.ClientDynamicLights or {}) },
+            { material.SetFloat, "$c0_x", #pointLights },
             { material.SetFloat, "$c0_y", deferred.aoRadius or 72 },
-            { material.SetFloat, "$c0_z", deferred.ao == false and 0 or (deferred.aoStrength or 0.35) },
-            { material.SetFloat, "$c0_w", deferred.contactShadows == false and 0 or 1 },
+            { material.SetFloat, "$c0_z", isNKMPass and deferred.ao ~= false and (deferred.aoStrength or 0.35) or 0 },
+            { material.SetFloat, "$c0_w", isNKMPass
+                and (lighting.shadows ~= false and 1 or 0)
+                or (lighting.shadows ~= false and deferred.contactShadows ~= false and 1 or 0) },
             { material.SetFloat, "$c1_x", ScrW() },
-            { material.SetFloat, "$c1_y", ScrH() }
+            { material.SetFloat, "$c1_y", ScrH() },
+            { material.SetFloat, "$c2_x", (ambient[1] or 0) / 255 },
+            { material.SetFloat, "$c2_y", (ambient[2] or 0) / 255 },
+            { material.SetFloat, "$c2_z", (ambient[3] or 0) / 255 },
+            { material.SetFloat, "$c2_w", isNKMPass and NKM.GShaderPixelLighting == true and 1 or 0 }
         }
+
+        -- c3/c4, c5/c6, c7/c8, c9/c10: direction+intensity and color+shadow flag.
+        for index = 1, 4 do
+            local light = directional[index]
+            local register = 3 + (index - 1) * 2
+            local direction = light and light.direction or { 0, 0, 0 }
+            local color = light and light.color or { 0, 0, 0 }
+            local intensity = light and (light.intensity or 1) or 0
+            local castsShadows = light and lighting.shadows ~= false and light.shadows ~= false and 1 or 0
+            setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_x", direction[1] or 0 }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_y", direction[2] or 0 }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_z", direction[3] or 0 }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_w", intensity }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. (register + 1) .. "_x", (color[1] or 0) / 255 }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. (register + 1) .. "_y", (color[2] or 0) / 255 }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. (register + 1) .. "_z", (color[3] or 0) / 255 }
+            setters[#setters + 1] = { material.SetFloat, "$c" .. (register + 1) .. "_w", castsShadows }
+        end
+
         for _, setter in ipairs(setters) do
             local succeeded, setError = pcall(setter[1], material, setter[2], setter[3])
             if not succeeded then error(setError or ("failed to set " .. setter[2])) end
         end
 
-        -- Update _rt_FullFrameFB only after all opaque NKM and BSP geometry has
-        -- been drawn. The stencil bit restricts the shader's writes to NKM pixels.
+        -- The NKM ambient/AO pass is stencil-limited. The point-light pass uses
+        -- the full opaque GBuffer so it can illuminate players and props.
         render.UpdateScreenEffectTexture()
-        configureNKMStencilTest()
+        if isNKMPass then
+            configureNKMStencilTest()
+        else
+            resetNKMStencilState()
+        end
         render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
         render.SetMaterial(material)
         shaderlib.Draw3DScreenQuad()
     end)
 
-    -- Do not leak blend or stencil state into Source translucent rendering.
     render.OverrideBlend(false)
     render.SetBlend(1)
     resetNKMStencilState()
     if not ok then
-        NKM.GShaderLastError = "NKM deferred shader pass failed: " .. tostring(err)
+        NKM.GShaderLastError = "NKM deferred " .. tostring(passName) .. " pass failed: " .. tostring(err)
         return false
     end
 
     NKM.GShaderDeferredPassCount = (NKM.GShaderDeferredPassCount or 0) + 1
+    if isNKMPass then
+        NKM.GShaderNKMStaticPassCount = (NKM.GShaderNKMStaticPassCount or 0) + 1
+    else
+        NKM.GShaderGlobalPointPassCount = (NKM.GShaderGlobalPointPassCount or 0) + 1
+    end
     NKM.GShaderLastError = nil
     return true
 end
@@ -1448,7 +1556,7 @@ end
 hook.Add("PreDrawOpaqueRenderables", "NKM.GShaderStencilClear", function(bDrawingDepth, bDrawingSkybox)
     if bDrawingDepth or bDrawingSkybox then return end
     NKM.GShaderReadyFrame = false
-    if shouldBuildGShaderMask() then clearNKMStencilBit() end
+    if NKM.GShaderMaskDebug or hasNKMStaticDeferredLighting() then clearNKMStencilBit() end
 end)
 
 hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, bDrawingSkybox)
@@ -1554,20 +1662,36 @@ hook.Add("PreDrawTranslucentRenderables", "NKM.GShaderDeferredPass", function(bD
     if bDrawingDepth or bDrawingSkybox then return end
     if not NKM.GShaderReadyFrame then return end
     NKM.GShaderReadyFrame = false
-    if not shouldBuildGShaderMask() then return end
+    if not shouldBuildGShaderMask() or not getNKMDeferredMaterial() then return end
 
-    markVisibleNKMGeometry()
-    if NKM.GShaderMaskDebug then
-        drawGShaderMaskDebug()
-        return
+    local hasNKMStaticPass = NKM.GShaderMaskDebug or hasNKMStaticDeferredLighting()
+    if hasNKMStaticPass then
+        markVisibleNKMGeometry()
+        if NKM.GShaderMaskDebug then
+            drawGShaderMaskDebug()
+            return
+        end
+        if not drawNKMDeferredLighting(NKM.GShaderLastViewSetup, "nkm") then
+            if NKM.GShaderLastError then
+                NKM.GShaderLastStatusPrintAt = NKM.GShaderLastStatusPrintAt or 0
+                if RealTime() >= NKM.GShaderLastStatusPrintAt then
+                    NKM.GShaderLastStatusPrintAt = RealTime() + 5
+                    print("[NKM] GShader NKM pass skipped: " .. tostring(NKM.GShaderLastError))
+                end
+            end
+        end
     end
 
-    if not drawNKMDeferredLighting(NKM.GShaderLastViewSetup) then
-        if NKM.GShaderLastError then
-            NKM.GShaderLastStatusPrintAt = NKM.GShaderLastStatusPrintAt or 0
-            if RealTime() >= NKM.GShaderLastStatusPrintAt then
-                NKM.GShaderLastStatusPrintAt = RealTime() + 5
-                print("[NKM] GShader deferred pass skipped: " .. tostring(NKM.GShaderLastError))
+    -- All active point lights use the full opaque GBuffer, not the NKM stencil.
+    -- They therefore illuminate NKM geometry, opaque players and opaque props.
+    if #(NKM.ClientDynamicLights or {}) > 0 then
+        if not drawNKMDeferredLighting(NKM.GShaderLastViewSetup, "global") then
+            if NKM.GShaderLastError then
+                NKM.GShaderLastStatusPrintAt = NKM.GShaderLastStatusPrintAt or 0
+                if RealTime() >= NKM.GShaderLastStatusPrintAt then
+                    NKM.GShaderLastStatusPrintAt = RealTime() + 5
+                    print("[NKM] GShader global point pass skipped: " .. tostring(NKM.GShaderLastError))
+                end
             end
         end
     end
@@ -1597,7 +1721,9 @@ concommand.Add("nkm_lighting_status", function()
     print("[NKM] GShader material: " .. (getNKMDeferredMaterial() and "compiled/available" or tostring(NKM.GShaderLastError or "unavailable")))
     print("[NKM] GShader LUT: " .. (NKM.GShaderLUTGeneration == NKM.ClientGeneration and "uploaded" or "not uploaded")
         .. (NKM.GShaderLUTLastError and (" (" .. tostring(NKM.GShaderLUTLastError) .. ")") or ""))
-    print("[NKM] NKM baked lighting remains independent; deferred mask prevents the custom point-light/AO pass from affecting BSP pixels.")
+    print("[NKM] Per-pixel lighting requested: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
+        .. "; active: " .. tostring(NKM.GShaderPixelLighting == true))
+    print("[NKM] NKM AO/static pass is stencil-limited; point lights use the full-screen opaque GBuffer.")
 end)
 
 concommand.Add("nkm_gshader_status", function()
@@ -1605,6 +1731,10 @@ concommand.Add("nkm_gshader_status", function()
     local material = getNKMDeferredMaterial()
     print("[NKM] GShader available: " .. tostring(available))
     print("[NKM] GShader bridge enabled: " .. tostring(NKM.GShaderBridgeEnabled == true))
+    print("[NKM] Pixel lighting requested/active: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
+        .. "/" .. tostring(NKM.GShaderPixelLighting == true))
+    print("[NKM] Deferred passes: NKM=" .. tostring(NKM.GShaderNKMStaticPassCount or 0)
+        .. " global-points=" .. tostring(NKM.GShaderGlobalPointPassCount or 0))
     print("[NKM] Reconstruction hook seen: " .. tostring(NKM.GShaderLastHookAt ~= nil)
         .. (NKM.GShaderLastHookAt and string.format(" (%.2fs ago)", math.max(0, RealTime() - NKM.GShaderLastHookAt)) or ""))
     print("[NKM] NKM dynamic point lights: " .. tostring(#(NKM.ClientDynamicLights or {})))

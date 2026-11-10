@@ -11,6 +11,17 @@ sampler SceneBuffer          : register(s3); // GMod screen effect texture
 const float4 NKMParams : register(c0);
 // c1: x=screen width, y=screen height
 const float4 ScreenParams : register(c1);
+// c2: ambient RGB in 0..1
+const float4 NKMAmbient : register(c2);
+// Four directional lights: direction/intensity followed by color/shadow flag.
+const float4 NKMDir0 : register(c3);
+const float4 NKMDirColor0 : register(c4);
+const float4 NKMDir1 : register(c5);
+const float4 NKMDirColor1 : register(c6);
+const float4 NKMDir2 : register(c7);
+const float4 NKMDirColor2 : register(c8);
+const float4 NKMDir3 : register(c9);
+const float4 NKMDirColor3 : register(c10);
 // GShader sets this through IMaterial:SetMatrix("$viewprojmat", ...).
 const float4x4 ViewProj : register(c11);
 
@@ -68,6 +79,66 @@ float ReadContactVisibility(float3 worldPosition, float3 normal, float3 toLight,
     }
 
     return 1.0;
+}
+
+float ReadDirectionalVisibility(float3 worldPosition, float3 normal, float3 lightDirection)
+{
+    if (NKMParams.w < 0.5)
+        return 1.0;
+
+    float3 rayOrigin = worldPosition + normal * 2.0;
+    static const float NKM_DIRECTIONAL_SHADOW_DISTANCE = 4096.0;
+    [unroll]
+    for (int stepIndex = 1; stepIndex <= 6; ++stepIndex)
+    {
+        float t = (float)stepIndex / 7.0;
+        float3 sampleWorld = rayOrigin + lightDirection * (NKM_DIRECTIONAL_SHADOW_DISTANCE * t);
+        float4 clipPosition = mul(float4(sampleWorld, 1.0), ViewProj);
+        if (clipPosition.w <= 0.0001)
+            continue;
+
+        float2 ndc = clipPosition.xy / clipPosition.w;
+        float2 sampleUV = float2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+        if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
+            continue;
+
+        float sceneDepth = tex2Dlod(WorldPosBuffer, float4(sampleUV, 0, 0)).a;
+        if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
+            continue;
+
+        float expectedDepth = 1.0 / clipPosition.w;
+        float bias = max(NKM_DEPTH_BIAS, expectedDepth * 0.0125);
+        if (sceneDepth > expectedDepth + bias)
+            return 0.0;
+    }
+    return 1.0;
+}
+
+float3 EvaluateNKMDirLight(float3 worldPosition, float3 normal, float4 directionIntensity, float4 colorShadow)
+{
+    if (directionIntensity.w <= 0.0001)
+        return float3(0.0, 0.0, 0.0);
+
+    float3 lightDirection = normalize(directionIntensity.xyz);
+    float diffuse = saturate(dot(normal, lightDirection));
+    if (diffuse <= 0.0001)
+        return float3(0.0, 0.0, 0.0);
+
+    float visibility = 1.0;
+    if (colorShadow.a > 0.5)
+        visibility = ReadDirectionalVisibility(worldPosition, normal, lightDirection);
+
+    return colorShadow.rgb * (diffuse * directionIntensity.w * visibility);
+}
+
+float3 CalculateNKMStaticLighting(float3 worldPosition, float3 normal)
+{
+    float3 lighting = NKMAmbient.rgb;
+    lighting += EvaluateNKMDirLight(worldPosition, normal, NKMDir0, NKMDirColor0);
+    lighting += EvaluateNKMDirLight(worldPosition, normal, NKMDir1, NKMDirColor1);
+    lighting += EvaluateNKMDirLight(worldPosition, normal, NKMDir2, NKMDirColor2);
+    lighting += EvaluateNKMDirLight(worldPosition, normal, NKMDir3, NKMDirColor3);
+    return saturate(lighting);
 }
 
 float CalculateLocalAO(float2 uv, float3 worldPosition, float3 normal)
@@ -153,12 +224,11 @@ float4 main(PS_INPUT input) : COLOR0
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
 
     float ao = CalculateLocalAO(uv, worldPosition, worldNormal);
+    float3 staticLighting = CalculateNKMStaticLighting(worldPosition, worldNormal);
     float3 directLight = CalculateNKMPointLights(worldPosition, worldNormal);
-    // The current opaque NKM pass already contains the static vertex bake.
-    // Use its color as an albedo proxy, but keep a small floor so a point light
-    // can still reach a surface whose baked/static illumination is very dark.
-    // A future albedo-only RT pass can remove this approximation.
+    // SceneBuffer is unlit NKM albedo in the masked static pass and opaque-scene
+    // color in the full-screen point-light pass.
     float3 albedoProxy = max(sceneColor.rgb, float3(0.12, 0.12, 0.12));
-    float3 outputColor = sceneColor.rgb * ao + directLight * albedoProxy;
+    float3 outputColor = sceneColor.rgb * ao * staticLighting + directLight * albedoProxy;
     return float4(saturate(outputColor), sceneColor.a);
 }

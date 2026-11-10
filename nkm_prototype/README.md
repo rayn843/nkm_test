@@ -1,4 +1,11 @@
-# NKM Prototype 0.9.7
+# NKM Prototype 0.9.9-r6
+
+## GShader per-pixel lighting
+
+- Adds per-pixel NKM ambient/directional lighting from GShader world positions and normals.
+- Sends every NKM point light through the full-screen opaque GBuffer pass so lights can affect NKM geometry, players and props.
+- Keeps AO and NKM ambient/directional effects limited to the NKM stencil mask.
+- Preserves vertex lighting as the default compatibility mode. After rebuilding `shaders/fxc/nkm_deferred_lighting_ps30.vcs`, enable the new path with `nkm_gshader_pixel_lighting 1` before the map's chunks load.
 
 NKM (NikNaks Map Runtime) is an experimental custom world format and runtime for Garry's Mod. It renders world geometry from NKM map data, streams chunks to clients, caches chunk payloads on disk, creates server-side VPhysics collision proxies, and provides custom NKM trace APIs. Version 0.9.7 adds an LDR BSP displacement lightmap importer that transfers RGBExp32 samples onto displacement grid vertices, keeps WorldVertexTransition alpha blending, and adds an optional baked per-vertex lighting render mode.
 

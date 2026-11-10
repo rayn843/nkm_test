@@ -566,8 +566,11 @@ function NKM.BuildStreamPayloads(mapName, runtimeChunks, chunkStats, generation,
     if istable(lightingSettings) and lightingSettings.enabled ~= false then
         local hasDeferredSettings = istable(lightingSettings.deferred)
         local deferredSettings = hasDeferredSettings and lightingSettings.deferred or {}
+        local ambient = lightingSettings.ambient or { 32, 32, 32 }
         clientLighting = {
             enabled = true,
+            shadows = lightingSettings.shadows ~= false,
+            ambient = { ambient[1] or 32, ambient[2] or 32, ambient[3] or 32 },
             deferred = {
                 -- Do not silently enable screen-space AO on old baked-only maps.
                 -- A map opts into deferred effects by supplying lighting.deferred.
@@ -576,18 +579,28 @@ function NKM.BuildStreamPayloads(mapName, runtimeChunks, chunkStats, generation,
                 aoRadius = deferredSettings.aoRadius == nil and 72 or deferredSettings.aoRadius,
                 aoStrength = deferredSettings.aoStrength == nil and 0.35 or deferredSettings.aoStrength
             },
+            directional = {},
             point = {}
         }
+        for _, light in ipairs(lightingSettings.directional or {}) do
+            clientLighting.directional[#clientLighting.directional + 1] = {
+                direction = { light.direction[1], light.direction[2], light.direction[3] },
+                color = { (light.color or { 255, 255, 255 })[1], (light.color or { 255, 255, 255 })[2], (light.color or { 255, 255, 255 })[3] },
+                intensity = light.intensity == nil and 1 or light.intensity,
+                shadows = light.shadows ~= false
+            }
+        end
+        -- Ship static and dynamic point lights. The client keeps static point
+        -- lights vertex-baked until its matching deferred VCS shader is enabled.
         for _, light in ipairs(lightingSettings.point or {}) do
-            if light.dynamic == true then
-                clientLighting.point[#clientLighting.point + 1] = {
-                    position = { light.position[1], light.position[2], light.position[3] },
-                    color = { (light.color or { 255, 255, 255 })[1], (light.color or { 255, 255, 255 })[2], (light.color or { 255, 255, 255 })[3] },
-                    intensity = light.intensity == nil and 1 or light.intensity,
-                    radius = light.radius,
-                    shadows = light.shadows ~= false
-                }
-            end
+            clientLighting.point[#clientLighting.point + 1] = {
+                position = { light.position[1], light.position[2], light.position[3] },
+                color = { (light.color or { 255, 255, 255 })[1], (light.color or { 255, 255, 255 })[2], (light.color or { 255, 255, 255 })[3] },
+                intensity = light.intensity == nil and 1 or light.intensity,
+                radius = light.radius,
+                shadows = light.shadows ~= false,
+                dynamic = light.dynamic == true
+            }
         end
     end
 
