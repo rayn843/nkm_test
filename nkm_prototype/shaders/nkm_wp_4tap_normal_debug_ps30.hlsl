@@ -14,16 +14,16 @@ float3 getWorldPosition(float2 uv) {
 }
 
 float4 main(PS_INPUT frag) : COLOR0 {
-    float2 uv = (frag.P + 0.5) * TexBaseSize;
+    // Use interpolated screen-quad UVs, as in the working sampler-s2 debug
+    // shader. Do not derive the base UV from VPOS in this diagnostic.
+    float2 uv = saturate(frag.uv);
     float4 center = tex2Dlod(WorldPosInverseBuffer, float4(uv, 0, 0));
 
-    // Match GShader's world-position sky/far-plane rejection.
     if (center.a <= 0.000251) {
         discard;
     }
 
-    // Reproduce the exact four-tap derivative selection used by
-    // wpn_reconstruction_4tap_ps30, before octahedral encoding.
+    // Sample one source texel away in each screen-space direction.
     float2 uvLeft  = uv + float2(-1.0,  0.0) * TexBaseSize;
     float2 uvRight = uv + float2( 1.0,  0.0) * TexBaseSize;
     float2 uvDown  = uv + float2( 0.0, -1.0) * TexBaseSize;
