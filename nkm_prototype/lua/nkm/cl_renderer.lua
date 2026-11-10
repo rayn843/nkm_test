@@ -1436,10 +1436,22 @@ local function drawNKMRawDepth(viewSetup)
     return true, nil, drawnMeshes
 end
 
+local function setNKMShaderTexelSize(material, sourceTexture)
+    if not material or not sourceTexture then return end
+
+    local width = math.max(sourceTexture:Width(), 1)
+    local height = math.max(sourceTexture:Height(), 1)
+    material:SetFloat("$c4_x", 1 / width)
+    material:SetFloat("$c4_y", 1 / height)
+end
+
 local function drawNKMReconstruction(material, target, worldProjection, eyePosition, rawDepth, worldPos, frameBuffer)
     local pushedTarget = false
     local cameraStarted = false
     local ok, err = pcall(function()
+        -- VPOS-based GShader pixel shaders use c4 as the inverse source-texture
+        -- dimensions. Set it explicitly for NKM's dynamically created materials.
+        setNKMShaderTexelSize(material, rawDepth or target)
         material:SetMatrix("$INVVIEWPROJMAT", worldProjection:GetInverse())
         if eyePosition then
             material:SetFloat("$c0_x", eyePosition.x)
@@ -1524,6 +1536,7 @@ local function drawNKMDecodedVertexNormals()
     local pushedTarget = false
     local cameraStarted = false
     local ok, err = pcall(function()
+        setNKMShaderTexelSize(NKM_GShaderVertexNormalDecodeMaterial, NKM_GShaderVertexNormalRT)
         NKM_GShaderVertexNormalDecodeMaterial:SetTexture("$basetexture", NKM_GShaderVertexNormalRT)
         render.PushRenderTarget(NKM_GShaderDecodedVertexNormalRT)
         pushedTarget = true
@@ -1583,6 +1596,7 @@ local function drawNKMDecodedNormalDebug()
     local pushedTarget = false
     local cameraStarted = false
     local ok, err = pcall(function()
+        setNKMShaderTexelSize(NKM_GShaderNormalDecodeMaterial, NKM_GShaderNormalRT)
         NKM_GShaderNormalDecodeMaterial:SetTexture("$basetexture", NKM_GShaderNormalRT)
         render.PushRenderTarget(NKM_GShaderDecodedNormalRT)
         pushedTarget = true
@@ -1673,6 +1687,7 @@ local function buildNKMReconstructionBuffers(viewSetup)
             if fourTapOK then
                 local pushedTarget, cameraStarted = false, false
                 local decodeOK, decodeError = pcall(function()
+                    setNKMShaderTexelSize(NKM_GShaderNormal4TapDecodeMaterial, NKM_GShaderNormal4TapRT)
                     NKM_GShaderNormal4TapDecodeMaterial:SetTexture("$basetexture", NKM_GShaderNormal4TapRT)
                     render.PushRenderTarget(NKM_GShaderDecodedNormal4TapRT)
                     pushedTarget = true
