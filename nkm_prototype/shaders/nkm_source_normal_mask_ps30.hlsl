@@ -50,18 +50,18 @@ float3 SmoothSourceNormal(float2 uv, float4 centerDepth, float3 centerNormal)
     // Three rings reach farther across low-poly triangle faces. The wider
     // taps make the result visibly smoother than a 1-3 px cleanup filter.
     static const float2 offsets[24] = {
-        // Ring 1 px
-        float2(-1.0, -1.0), float2( 0.0, -1.0), float2( 1.0, -1.0),
-        float2(-1.0,  0.0),                       float2( 1.0,  0.0),
-        float2(-1.0,  1.0), float2( 0.0,  1.0), float2( 1.0,  1.0),
-        // Ring 3 px
-        float2(-3.0, -3.0), float2( 0.0, -3.0), float2( 3.0, -3.0),
-        float2(-3.0,  0.0),                       float2( 3.0,  0.0),
-        float2(-3.0,  3.0), float2( 0.0,  3.0), float2( 3.0,  3.0),
+        // Ring 2 px
+        float2(-2.0, -2.0), float2( 0.0, -2.0), float2( 2.0, -2.0),
+        float2(-2.0,  0.0),                       float2( 2.0,  0.0),
+        float2(-2.0,  2.0), float2( 0.0,  2.0), float2( 2.0,  2.0),
         // Ring 7 px
         float2(-7.0, -7.0), float2( 0.0, -7.0), float2( 7.0, -7.0),
         float2(-7.0,  0.0),                       float2( 7.0,  0.0),
-        float2(-7.0,  7.0), float2( 0.0,  7.0), float2( 7.0,  7.0)
+        float2(-7.0,  7.0), float2( 0.0,  7.0), float2( 7.0,  7.0),
+        // Ring 16 px
+        float2(-16.0, -16.0), float2( 0.0, -16.0), float2( 16.0, -16.0),
+        float2(-16.0,   0.0),                         float2( 16.0,   0.0),
+        float2(-16.0,  16.0), float2( 0.0,  16.0), float2( 16.0,  16.0)
     };
     static const float spatialWeights[24] = {
         1.00, 1.00, 1.00,
