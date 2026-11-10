@@ -3,7 +3,7 @@
 ## GShader per-pixel lighting
 
 - Adds per-pixel NKM ambient/directional lighting from GShader world positions and normals.
-- Evaluates AO, NKM ambient/directional lighting (pixel mode), and point lights in one unmasked full-screen GBuffer pass for visible BSP and NKM surfaces.
+- Evaluates AO, NKM ambient/directional lighting (pixel mode), and point lights in one unmasked full-screen pass over NKM receiver pixels; merged Source/NKM depth remains available for AO and screen-space blockers.
 - Includes opaque players and props when their depth/normals are present in GShader's reconstructed buffers; the NKM stencil is debug-only.
 - Preserves vertex lighting as the default compatibility mode. After rebuilding `shaders/fxc/nkm_deferred_lighting_ps30.vcs`, enable the new path with `nkm_gshader_pixel_lighting 1` before the map's chunks load.
 
