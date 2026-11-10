@@ -1306,7 +1306,7 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
                 ["$pixshader"] = "wpn_reconstruction_4tap_ps30",
                 ["$vertexshader"] = "reconstruction_vs30",
                 ["$basetexture"] = "_rt_NKM_RawDepth",
-                ["$texture1"] = "_rt_FullFrameFB",
+                ["$texture1"] = "_rt_WPDepth",
                 ["$texture2"] = "_rt_NKM_WPDepth",
                 ["$no_fullbright"] = "1",
                 ["$vertexcolor"] = "1",
@@ -1903,9 +1903,15 @@ local function buildNKMReconstructionBuffers(viewSetup)
     end
 
     local frameBuffer = render.GetScreenEffectTexture()
+    local sourceWorldPosition = shaderlib.rt_WPDepth
+    if not sourceWorldPosition then
+        NKM.GShaderNKMBufferLastError = "GShader source world-position buffer is unavailable"
+        return false
+    end
+
     local normalOK, normalError = drawNKMReconstruction(
         NKM_GShaderNormalMaterial, NKM_GShaderNormalRT,
-        worldProjection, nil, NKM_GShaderRawDepthRT, NKM_GShaderWorldPosRT, frameBuffer)
+        worldProjection, nil, NKM_GShaderRawDepthRT, NKM_GShaderWorldPosRT, sourceWorldPosition)
     if not normalOK then
         NKM.GShaderNKMBufferLastError = "NKM normal reconstruction failed: " .. tostring(normalError)
         return false
