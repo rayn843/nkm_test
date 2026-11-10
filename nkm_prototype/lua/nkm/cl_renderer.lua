@@ -1,0 +1,1862 @@
+NKM.ClientMap = nil
+NKM.ClientManifest = nil
+NKM.ClientMapName = nil
+NKM.ClientGeneration = nil
+NKM.ClientChunks = {}
+NKM.ClientChunkStats = nil
+NKM.RenderMeshes = {}
+NKM.ManifestTransfer = nil
+NKM.ChunkTransfers = {}
+NKM.ChunkLoadDistance = 4096
+NKM.ChunkUnloadDistance = 6144
+NKM.NextChunkUpdate = 0
+NKM.NextChunkRequestAt = 0
+NKM.LoadedClientChunkCount = 0
+NKM.ChunkCacheEnabled = true
+NKM.ChunkCacheRoot = "nkm/cache"
+NKM.CullModeSetting = NKM.CullModeSetting or 0
+NKM.ChunkCacheStats = NKM.ChunkCacheStats or {
+    Hits = 0,
+    Misses = 0,
+    Writes = 0,
+    Corruptions = 0,
+    Evictions = 0,
+    BytesRead = 0,
+    BytesWritten = 0
+}
+
+file.CreateDir("nkm")
+file.CreateDir(NKM.ChunkCacheRoot)
+
+local DEFAULT_MATERIAL = CreateMaterial("nkm_prototype_unlit_v6", "UnlitGeneric", {
+    ["$basetexture"] = "color/white",
+    ["$vertexcolor"] = "1"
+})
+
+-- Diagnostic material deliberately ignores the source BSP material/lightmap.
+-- A per-displacement color is applied with render.SetColorModulation in the draw hook.
+local BSP_DISPLACEMENT_DEBUG_MATERIAL = CreateMaterial("nkm_bspdisp_debug_unlit", "UnlitGeneric", {
+    ["$basetexture"] = "color/white",
+    ["$vertexcolor"] = "1",
+    ["$nocull"] = "1"
+})
+
+NKM.ClientBSPDisplacementRenderEnabled = NKM.ClientBSPDisplacementRenderEnabled ~= false
+NKM.ClientBSPDisplacementDebug = NKM.ClientBSPDisplacementDebug == true
+NKM.ClientBSPDisplacementMaterialMode = NKM.ClientBSPDisplacementMaterialMode or "albedo"
+NKM.ClientBSPDisplacementRenderOffset = tonumber(NKM.ClientBSPDisplacementRenderOffset) or 0
+
+-- Optional GShader deferred bridge. The main NKM renderer remains fully
+-- functional when GShader or the compiled custom shader is absent.
+NKM.GShaderBridgeEnabled = NKM.GShaderBridgeEnabled ~= false
+NKM.GShaderMaskDebug = NKM.GShaderMaskDebug == true
+NKM.GShaderReadyFrame = false
+NKM.GShaderMaskPassCount = NKM.GShaderMaskPassCount or 0
+NKM.GShaderDeferredPassCount = NKM.GShaderDeferredPassCount or 0
+NKM.ClientLighting = nil
+NKM.ClientDynamicLights = {}
+NKM.GShaderDynamicLightLUT = nil
+NKM.GShaderLUTGeneration = nil
+NKM.GShaderLUTLastError = nil
+NKM.GShaderLastError = nil
+NKM.GShaderLastHookAt = nil
+NKM.GShaderLastMaskDraws = 0
+
+local GSHADER_NKM_STENCIL_BIT = 128
+local GSHADER_MAX_DYNAMIC_LIGHTS = 32
+
+local GSHADER_DEPTH_MATERIAL = CreateMaterial("nkm_gshader_depthwrite_r5", "DepthWrite", {
+    ["$basetexture"] = "color/white",
+    ["$color_depth"] = "1",
+    ["$nocull"] = "0"
+})
+
+local GSHADER_MASK_MATERIAL = CreateMaterial("nkm_gshader_mask_r5", "UnlitGeneric", {
+    ["$basetexture"] = "color/white",
+    ["$vertexcolor"] = "0",
+    ["$vertexalpha"] = "0",
+    ["$nocull"] = "0"
+})
+
+local function isFiniteNumber(value)
+    return isnumber(value) and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function destroyMeshList(meshList)
+    for _, entry in ipairs(meshList or {}) do
+        if entry.mesh and entry.mesh:IsValid() then
+            entry.mesh:Destroy()
+        end
+        if entry.blendMesh and entry.blendMesh:IsValid() then
+            entry.blendMesh:Destroy()
+        end
+    end
+end
+
+local function getVertexColor(value)
+    if not value then return Color(255, 255, 255, 255) end
+    return Color(
+        math.Clamp(math.floor(value[1] or 255), 0, 255),
+        math.Clamp(math.floor(value[2] or 255), 0, 255),
+        math.Clamp(math.floor(value[3] or 255), 0, 255),
+        math.Clamp(math.floor(value[4] or 255), 0, 255)
+    )
+end
+
+local function makeMeshVertex(value, renderOffset, forceWhite, applyNKMLighting)
+    local p = value.p
+    local n = value.n or { 0, 0, 1 }
+    local uv = value.uv or { 0, 0 }
+    local position = Vector(p[1], p[2], p[3])
+    local normal = Vector(n[1], n[2], n[3])
+
+    -- This offset affects the client render mesh only. Collision and trace data
+    -- remain at exact Source BSP coordinates, allowing a clean Z-fighting test.
+    if renderOffset and math.abs(renderOffset) > 0.0001 then
+        if normal:LengthSqr() > 0.000001 then
+            normal:Normalize()
+            position = position + normal * renderOffset
+        end
+    end
+
+    local color = forceWhite and Color(255, 255, 255, 255) or getVertexColor(value.color)
+    local light = applyNKMLighting and value.nkmLighting or nil
+    if light then
+        color.r = math.Clamp(math.floor(color.r * math.Clamp((light[1] or 255) / 255, 0, 1) + 0.5), 0, 255)
+        color.g = math.Clamp(math.floor(color.g * math.Clamp((light[2] or 255) / 255, 0, 1) + 0.5), 0, 255)
+        color.b = math.Clamp(math.floor(color.b * math.Clamp((light[3] or 255) / 255, 0, 1) + 0.5), 0, 255)
+    end
+
+    return {
+        pos = position,
+        normal = normal,
+        u = uv[1],
+        v = uv[2],
+        color = color
+    }
+end
+
+local BSPAlbedoMaterialCache = {}
+
+local function getSafeMaterialString(material, key)
+    if not material then return nil end
+    local ok, value = pcall(material.GetString, material, key)
+    if ok and isstring(value) and value ~= "" then return value end
+    return nil
+end
+
+local function getSafeMaterialShader(material)
+    if not material then return "<unavailable>" end
+    local ok, value = pcall(material.GetShader, material)
+    if ok and isstring(value) then return value end
+    return "<unavailable>"
+end
+
+local function createBSPAlbedoMaterial(sourceName, textureName, blendLayer)
+    if not isstring(textureName) or textureName == "" then return DEFAULT_MATERIAL end
+    local cacheKey = tostring(sourceName) .. "|" .. textureName .. "|" .. tostring(blendLayer == true)
+    if BSPAlbedoMaterialCache[cacheKey] then return BSPAlbedoMaterialCache[cacheKey] end
+
+    local hash = util.CRC(cacheKey)
+    local parameters = {
+        ["$basetexture"] = textureName,
+        ["$vertexcolor"] = "1",
+        ["$vertexalpha"] = blendLayer and "1" or "0",
+        ["$nocull"] = "1"
+    }
+    if blendLayer then parameters["$translucent"] = "1" end
+
+    local ok, generated = pcall(CreateMaterial, "nkm_bsp_albedo_" .. tostring(hash), "UnlitGeneric", parameters)
+    if not ok or not generated then generated = DEFAULT_MATERIAL end
+    BSPAlbedoMaterialCache[cacheKey] = generated
+    return generated
+end
+
+local function getBSPMaterialBundle(materialName)
+    local sourceMaterial = DEFAULT_MATERIAL
+    if isstring(materialName) and materialName ~= "" then
+        local ok, candidate = pcall(Material, materialName)
+        if ok and candidate then
+            local errorOK, isError = pcall(candidate.IsError, candidate)
+            if errorOK and not isError then sourceMaterial = candidate end
+        end
+    end
+
+    local shader = getSafeMaterialShader(sourceMaterial)
+    local baseTexture = getSafeMaterialString(sourceMaterial, "$basetexture")
+    local baseTexture2 = getSafeMaterialString(sourceMaterial, "$basetexture2")
+    local albedoMaterial = createBSPAlbedoMaterial(materialName, baseTexture, false)
+    local blendMaterial = baseTexture2 and createBSPAlbedoMaterial(materialName, baseTexture2, true) or nil
+
+    return {
+        source = sourceMaterial,
+        shader = shader,
+        baseTexture = baseTexture,
+        baseTexture2 = baseTexture2,
+        albedo = albedoMaterial,
+        blend = blendMaterial
+    }
+end
+
+local NKMLightingMaterialCache = {}
+
+local function createNKMLightingMaterial(materialName)
+    local sourceMaterial = DEFAULT_MATERIAL
+    if isstring(materialName) and materialName ~= "" then
+        local ok, candidate = pcall(Material, materialName)
+        if ok and candidate then
+            local errorOK, isError = pcall(candidate.IsError, candidate)
+            if errorOK and not isError then sourceMaterial = candidate end
+        end
+    end
+
+    local baseTexture = getSafeMaterialString(sourceMaterial, "$basetexture") or "color/white"
+    local cacheKey = tostring(materialName or "<default>") .. "|" .. baseTexture
+    if NKMLightingMaterialCache[cacheKey] then return NKMLightingMaterialCache[cacheKey] end
+
+    -- The NKM lighting path deliberately uses a predictable vertex-color shader.
+    -- Complex Source world shaders remain available in the non-lit material path.
+    local hash = util.CRC(cacheKey)
+    local ok, generated = pcall(CreateMaterial, "nkm_vertex_lit_v5_" .. tostring(hash), "UnlitGeneric", {
+        ["$basetexture"] = baseTexture,
+        ["$vertexcolor"] = "1",
+        ["$vertexalpha"] = "1"
+    })
+    if not ok or not generated then generated = DEFAULT_MATERIAL end
+    NKMLightingMaterialCache[cacheKey] = generated
+    return generated
+end
+
+local function buildChunkRenderMeshes(meshGroups, chunkID)
+    local built = {}
+
+    for groupIndex, group in ipairs(meshGroups or {}) do
+        local source = group.vertices or {}
+        local sourceIndex = 1
+        local isBSPDisplacement = group.isBSPDisplacement == true
+        local hasNKMLighting = group.hasNKMLighting == true
+        local renderOffset = isBSPDisplacement and (NKM.ClientBSPDisplacementRenderOffset or 0) or 0
+        local material = DEFAULT_MATERIAL
+        local bspBundle = nil
+        local nkmLightingMaterial = nil
+        local flipBrushWinding = not isBSPDisplacement and NKM.ClientFlipBrushWinding ~= false
+        if isBSPDisplacement then
+            bspBundle = getBSPMaterialBundle(group.material)
+            material = bspBundle.source
+        elseif isstring(group.material) and group.material ~= "" then
+            local materialOK, candidate = pcall(Material, group.material)
+            if materialOK and candidate then
+                local errorOK, isError = pcall(candidate.IsError, candidate)
+                if errorOK and not isError then material = candidate end
+            end
+            if hasNKMLighting then
+                nkmLightingMaterial = createNKMLightingMaterial(group.material)
+            end
+        end
+
+        while sourceIndex <= #source do
+            local batch = {}
+            local blendBatch = bspBundle and bspBundle.blend and {} or nil
+            local batchEnd = math.min(sourceIndex + NKM.MeshVertexLimit - 1, #source)
+            batchEnd = batchEnd - ((batchEnd - sourceIndex + 1) % 3)
+            if batchEnd < sourceIndex then
+                destroyMeshList(built)
+                return nil, "could not create triangle-aligned mesh batch"
+            end
+
+            local useBSPVertexLighting = isBSPDisplacement and NKM.ClientBSPDisplacementMaterialMode == "lit"
+            local forceWhite = isBSPDisplacement and not useBSPVertexLighting
+            for index = sourceIndex, batchEnd do
+                local value = source[index]
+                batch[#batch + 1] = makeMeshVertex(value, renderOffset, forceWhite, hasNKMLighting)
+                if blendBatch then
+                    local blendVertex = makeMeshVertex(value, renderOffset, forceWhite, hasNKMLighting)
+                    local color = blendVertex.color
+                    color.a = math.Clamp(math.floor((value.blendAlpha or 255) + 0.5), 0, 255)
+                    blendVertex.color = color
+                    blendBatch[#blendBatch + 1] = blendVertex
+                end
+            end
+
+            -- Source IMesh culling expects the opposite triangle order to the
+            -- editor's outward-facing face order. Keep this flip for ordinary NKM
+            -- brush meshes; do not apply it to imported BSP displacements.
+            if flipBrushWinding then
+                for i = 1, #batch - 2, 3 do
+                    batch[i + 1], batch[i + 2] = batch[i + 2], batch[i + 1]
+                end
+            end
+
+            -- BSP world shaders (especially WorldVertexTransition) are not a
+            -- supported IMesh vertex-format contract. Use the generic format
+            -- for imported displacements and bind compatible materials at Draw.
+            local imesh = (isBSPDisplacement or hasNKMLighting) and Mesh() or Mesh(material)
+            if not imesh then
+                destroyMeshList(built)
+                return nil, "Mesh() returned nil for chunk " .. tostring(chunkID)
+            end
+
+            local ok, err = pcall(function()
+                imesh:BuildFromTriangles(batch)
+            end)
+            if not ok then
+                if imesh:IsValid() then imesh:Destroy() end
+                destroyMeshList(built)
+                return nil, "BuildFromTriangles failed in chunk " .. tostring(chunkID) .. ": " .. tostring(err)
+            end
+
+            local blendMesh = nil
+            if blendBatch then
+                blendMesh = Mesh()
+                if not blendMesh then
+                    if imesh:IsValid() then imesh:Destroy() end
+                    destroyMeshList(built)
+                    return nil, "blend Mesh() returned nil for chunk " .. tostring(chunkID)
+                end
+                local blendOK, blendError = pcall(function()
+                    blendMesh:BuildFromTriangles(blendBatch)
+                end)
+                if not blendOK then
+                    if imesh:IsValid() then imesh:Destroy() end
+                    if blendMesh:IsValid() then blendMesh:Destroy() end
+                    destroyMeshList(built)
+                    return nil, "blend BuildFromTriangles failed in chunk " .. tostring(chunkID) .. ": " .. tostring(blendError)
+                end
+            end
+
+            built[#built + 1] = {
+                mesh = imesh,
+                blendMesh = blendMesh,
+                material = material,
+                albedoMaterial = bspBundle and bspBundle.albedo or nil,
+                blendMaterial = bspBundle and bspBundle.blend or nil,
+                nkmLightingMaterial = nkmLightingMaterial,
+                hasNKMLighting = hasNKMLighting,
+                sourceShader = bspBundle and bspBundle.shader or nil,
+                sourceBaseTexture = bspBundle and bspBundle.baseTexture or nil,
+                sourceBaseTexture2 = bspBundle and bspBundle.baseTexture2 or nil,
+                sourceGroup = group.sourceGroup or groupIndex,
+                chunkID = chunkID,
+                isBSPDisplacement = isBSPDisplacement,
+                sourcePatchID = group.sourcePatchID or group.sourceGroup or groupIndex,
+                sourceFace = group.sourceFace,
+                sourceMaterial = group.material
+            }
+            sourceIndex = batchEnd + 1
+        end
+    end
+
+    return built
+end
+
+local function rebuildLoadedMeshList()
+    local combined = {}
+    local loadedCount = 0
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        if chunk.loaded then loadedCount = loadedCount + 1 end
+        for _, entry in ipairs(chunk.renderMeshes or {}) do
+            combined[#combined + 1] = entry
+        end
+    end
+    NKM.RenderMeshes = combined
+    NKM.LoadedClientChunkCount = loadedCount
+end
+
+local function distanceSqrToBounds(position, mins, maxs)
+    local dx = position.x < mins.x and mins.x - position.x or (position.x > maxs.x and position.x - maxs.x or 0)
+    local dy = position.y < mins.y and mins.y - position.y or (position.y > maxs.y and position.y - maxs.y or 0)
+    local dz = position.z < mins.z and mins.z - position.z or (position.z > maxs.z and position.z - maxs.z or 0)
+    return dx * dx + dy * dy + dz * dz
+end
+
+local function getChunkCacheDirectory(mapName)
+    if not NKM.IsValidMapName(mapName) then return nil end
+    return NKM.ChunkCacheRoot .. "/" .. string.lower(mapName) .. "/format_" .. tostring(NKM.Version)
+end
+
+local function getChunkCacheFileName(chunk)
+    if not chunk or not isnumber(chunk.index) or chunk.index < 1 or not isstring(chunk.checksum) then
+        return nil
+    end
+    if not chunk.checksum:match("^[%w]+$") then return nil end
+    return "chunk_" .. tostring(math.floor(chunk.index)) .. "_" .. chunk.checksum .. ".dat"
+end
+
+local function getChunkCachePath(chunk, mapName)
+    local directory = getChunkCacheDirectory(mapName or NKM.ClientMapName)
+    local fileName = getChunkCacheFileName(chunk)
+    if not directory or not fileName then return nil end
+    return directory .. "/" .. fileName
+end
+
+local function addCacheStat(name, amount)
+    NKM.ChunkCacheStats[name] = (NKM.ChunkCacheStats[name] or 0) + (amount or 1)
+end
+
+local function readChunkCacheInternal(chunk)
+    if not NKM.ChunkCacheEnabled then return nil, "disabled" end
+    local path = getChunkCachePath(chunk)
+    if not path then return nil, "invalid cache path" end
+
+    local raw = file.Read(path, "DATA")
+    if not raw then
+        addCacheStat("Misses")
+        return nil, "miss"
+    end
+
+    addCacheStat("BytesRead", #raw)
+    if #raw ~= chunk.expectedBytes or util.CRC(raw) ~= chunk.checksum then
+        file.Delete(path)
+        addCacheStat("Corruptions")
+        addCacheStat("Evictions")
+        addCacheStat("Misses")
+        return nil, "corrupt"
+    end
+
+    local decoded = util.JSONToTable(raw)
+    if not istable(decoded) then
+        file.Delete(path)
+        addCacheStat("Corruptions")
+        addCacheStat("Evictions")
+        addCacheStat("Misses")
+        return nil, "invalid JSON"
+    end
+
+    return decoded, "hit"
+end
+
+function NKM.ReadChunkCache(chunk)
+    local startedAt = NKM.PerfBegin()
+    local payload, state = readChunkCacheInternal(chunk)
+    NKM.PerfRecord("cache_read_validate_decode", startedAt)
+    if payload then NKM.PerfAdd("cache_disk_hits", 1) end
+    return payload, state
+end
+
+local function writeChunkCacheInternal(chunk, raw)
+    if not NKM.ChunkCacheEnabled or not isstring(raw) then return false, "disabled or invalid payload" end
+    local path = getChunkCachePath(chunk)
+    local directory = getChunkCacheDirectory(NKM.ClientMapName)
+    if not path or not directory then return false, "invalid cache path" end
+    if #raw ~= chunk.expectedBytes or util.CRC(raw) ~= chunk.checksum then
+        return false, "payload does not match manifest checksum"
+    end
+
+    file.CreateDir(NKM.ChunkCacheRoot)
+    file.CreateDir(NKM.ChunkCacheRoot .. "/" .. string.lower(NKM.ClientMapName))
+    file.CreateDir(directory)
+    local ok = file.Write(path, raw)
+    if not ok and file.Read(path, "DATA") ~= raw then
+        return false, "file.Write failed"
+    end
+
+    addCacheStat("Writes")
+    addCacheStat("BytesWritten", #raw)
+    return true
+end
+
+function NKM.WriteChunkCache(chunk, raw)
+    local startedAt = NKM.PerfBegin()
+    local ok, err = writeChunkCacheInternal(chunk, raw)
+    NKM.PerfRecord("cache_write", startedAt)
+    return ok, err
+end
+
+function NKM.CleanChunkCache(manifest, chunks)
+    if not NKM.ChunkCacheEnabled or not istable(manifest) then return end
+    local directory = getChunkCacheDirectory(manifest.mapName)
+    if not directory then return end
+
+    file.CreateDir(NKM.ChunkCacheRoot)
+    file.CreateDir(NKM.ChunkCacheRoot .. "/" .. string.lower(manifest.mapName))
+    file.CreateDir(directory)
+
+    -- The checksum is part of every filename. Keep only entries referenced by
+    -- the current manifest; stale map revisions are removed automatically.
+    local expected = {}
+    for _, chunk in ipairs(chunks or {}) do
+        local name = getChunkCacheFileName(chunk)
+        if name then expected[name] = true end
+    end
+
+    local files = file.Find(directory .. "/*.dat", "DATA") or {}
+    for _, name in ipairs(files) do
+        if name:match("^chunk_%d+_[%w]+%.dat$") and not expected[name] then
+            file.Delete(directory .. "/" .. name)
+            addCacheStat("Evictions")
+        end
+    end
+
+    -- Remove cache files from old format-version directories for this map.
+    local mapRoot = NKM.ChunkCacheRoot .. "/" .. string.lower(manifest.mapName)
+    local _, oldDirectories = file.Find(mapRoot .. "/*", "DATA")
+    oldDirectories = oldDirectories or {}
+    local currentDirectoryName = "format_" .. tostring(NKM.Version)
+    for _, oldName in ipairs(oldDirectories) do
+        if oldName:match("^format_%d+$") and oldName ~= currentDirectoryName then
+            local oldPath = mapRoot .. "/" .. oldName
+            local oldFiles = file.Find(oldPath .. "/*", "DATA") or {}
+            for _, oldFile in ipairs(oldFiles) do
+                if oldFile:match("^chunk_%d+_[%w]+%.dat$") then
+                    file.Delete(oldPath .. "/" .. oldFile)
+                    addCacheStat("Evictions")
+                end
+            end
+        end
+    end
+end
+
+function NKM.GetChunkCacheDiskStats(mapName)
+    local directory = getChunkCacheDirectory(mapName or NKM.ClientMapName)
+    if not directory then return 0, 0 end
+    local files = file.Find(directory .. "/*.dat", "DATA") or {}
+    local count, bytes = 0, 0
+    for _, name in ipairs(files) do
+        if name:match("^chunk_%d+_[%w]+%.dat$") then
+            local size = file.Size(directory .. "/" .. name, "DATA")
+            if size and size > 0 then
+                count = count + 1
+                bytes = bytes + size
+            end
+        end
+    end
+    return count, bytes
+end
+
+local function clearMapChunkCache(mapName)
+    if not NKM.IsValidMapName(mapName) then return 0 end
+    local mapRoot = NKM.ChunkCacheRoot .. "/" .. string.lower(mapName)
+    local _, directories = file.Find(mapRoot .. "/*", "DATA")
+    directories = directories or {}
+    local deleted = 0
+    for _, directoryName in ipairs(directories) do
+        if directoryName:match("^format_%d+$") then
+            local directory = mapRoot .. "/" .. directoryName
+            local files = file.Find(directory .. "/*", "DATA") or {}
+            for _, fileName in ipairs(files) do
+                if fileName:match("^chunk_%d+_[%w]+%.dat$") then
+                    file.Delete(directory .. "/" .. fileName)
+                    deleted = deleted + 1
+                end
+            end
+        end
+    end
+    return deleted
+end
+
+function NKM.ClearChunkCache(mapName)
+    if mapName then return clearMapChunkCache(mapName) end
+    local _, maps = file.Find(NKM.ChunkCacheRoot .. "/*", "DATA")
+    maps = maps or {}
+    local deleted = 0
+    for _, cachedMap in ipairs(maps) do
+        if NKM.IsValidMapName(cachedMap) then
+            deleted = deleted + clearMapChunkCache(cachedMap)
+        end
+    end
+    return deleted
+end
+
+local function rebuildClientTraceMap()
+    local perfStartedAt = NKM.PerfBegin()
+    if not NKM.ClientMapName then
+        NKM.TraceMap = nil
+        NKM.PerfRecord("trace_rebuild", perfStartedAt)
+        return
+    end
+
+    local traceChunks = {}
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        if chunk.loaded and ((istable(chunk.collision) and #chunk.collision > 0)
+            or (istable(chunk.triangleSurfaces) and #chunk.triangleSurfaces > 0)) then
+            traceChunks[#traceChunks + 1] = chunk
+        end
+    end
+
+    local traceMap, err = NKM.BuildTraceData({
+        name = NKM.ClientMapName,
+        collision = {}
+    }, NKM.ClientMapName, traceChunks)
+
+    if not traceMap then
+        ErrorNoHalt("[NKM] Could not rebuild client trace map: " .. tostring(err) .. "\n")
+        NKM.TraceMap = nil
+        NKM.PerfRecord("trace_rebuild", perfStartedAt)
+        return
+    end
+
+    NKM.TraceMap = traceMap
+    NKM.PerfRecord("trace_rebuild", perfStartedAt)
+end
+
+local function hasGShaderAPI()
+    return istable(shaderlib)
+        and isfunction(shaderlib.Draw3DScreenQuad)
+        and isfunction(shaderlib.GetViewProjMatrix)
+        and isfunction(shaderlib.CanDrawEffects)
+end
+
+local function setClientLightingSettings(lighting)
+    local hasDeferredSettings = istable(lighting) and istable(lighting.deferred)
+    local clean = {
+        enabled = istable(lighting) and lighting.enabled ~= false,
+        deferred = {
+            ao = hasDeferredSettings and lighting.deferred.ao ~= false,
+            contactShadows = hasDeferredSettings and lighting.deferred.contactShadows ~= false,
+            aoRadius = 72,
+            aoStrength = 0.35
+        },
+        point = {}
+    }
+
+    if hasDeferredSettings then
+        local deferred = lighting.deferred
+        if isFiniteNumber(deferred.aoRadius) then clean.deferred.aoRadius = math.Clamp(deferred.aoRadius, 1, 512) end
+        if isFiniteNumber(deferred.aoStrength) then clean.deferred.aoStrength = math.Clamp(deferred.aoStrength, 0, 1) end
+    end
+
+    if clean.enabled and istable(lighting.point) then
+        for _, light in ipairs(lighting.point) do
+            if #clean.point >= GSHADER_MAX_DYNAMIC_LIGHTS then break end
+            if istable(light) and istable(light.position) and istable(light.color)
+                and isFiniteNumber(light.position[1]) and isFiniteNumber(light.position[2]) and isFiniteNumber(light.position[3])
+                and isFiniteNumber(light.color[1]) and isFiniteNumber(light.color[2]) and isFiniteNumber(light.color[3])
+                and isFiniteNumber(light.radius) and light.radius > 0
+                and isFiniteNumber(light.intensity or 1) then
+                clean.point[#clean.point + 1] = {
+                    position = { light.position[1], light.position[2], light.position[3] },
+                    color = {
+                        math.Clamp(light.color[1], 0, 255),
+                        math.Clamp(light.color[2], 0, 255),
+                        math.Clamp(light.color[3], 0, 255)
+                    },
+                    radius = math.Clamp(light.radius, 1, 16384),
+                    intensity = math.Clamp(light.intensity or 1, 0, 8),
+                    shadows = light.shadows ~= false
+                }
+            end
+        end
+    end
+
+    NKM.ClientLighting = clean
+    NKM.ClientDynamicLights = clean.point
+    NKM.GShaderLUTGeneration = nil
+    NKM.GShaderLUTLastError = nil
+end
+
+local function updateGShaderDynamicLightLUT()
+    if not hasGShaderAPI() or not isfunction(shaderlib.CreateLUT) or not isfunction(shaderlib.WritePixel) then
+        NKM.GShaderLUTLastError = "GShader LUT API unavailable"
+        return false
+    end
+    if NKM.GShaderLUTGeneration == NKM.ClientGeneration and NKM.GShaderDynamicLightLUT then
+        return true
+    end
+
+    local lut = NKM.GShaderDynamicLightLUT
+    if not lut then
+        local ok, result = pcall(shaderlib.CreateLUT, "_rt_NKM_DynamicLights", 2, GSHADER_MAX_DYNAMIC_LIGHTS)
+        if not ok or not result then
+            NKM.GShaderLUTLastError = tostring(result or "CreateLUT returned nil")
+            return false
+        end
+        lut = result
+        NKM.GShaderDynamicLightLUT = lut
+    end
+
+    for index = 0, GSHADER_MAX_DYNAMIC_LIGHTS - 1 do
+        local light = NKM.ClientDynamicLights[index + 1]
+        local position = light and light.position or { 0, 0, 0 }
+        local color = light and light.color or { 0, 0, 0 }
+        local intensity = light and light.intensity or 0
+        local radius = light and light.radius or 1
+        local castsShadows = light and light.shadows and 1 or 0
+
+        local okPosition, positionError = pcall(shaderlib.WritePixel,
+            lut, 0, index, position[1], position[2], position[3], radius)
+        local okColor, colorError = pcall(shaderlib.WritePixel,
+            lut, 1, index,
+            color[1] / 255 * intensity,
+            color[2] / 255 * intensity,
+            color[3] / 255 * intensity,
+            castsShadows)
+        if not okPosition or not okColor then
+            NKM.GShaderLUTLastError = tostring(positionError or colorError or "WritePixel failed")
+            return false
+        end
+    end
+
+    NKM.GShaderLUTGeneration = NKM.ClientGeneration
+    NKM.GShaderLUTLastError = nil
+    return true
+end
+
+local function getNKMDeferredMaterial()
+    if NKM.GShaderDeferredMaterial then
+        local ok, isError = pcall(NKM.GShaderDeferredMaterial.IsError, NKM.GShaderDeferredMaterial)
+        if ok and not isError then return NKM.GShaderDeferredMaterial end
+    end
+
+    local ok, material = pcall(Material, "pp/nkm_deferred_lighting")
+    if not ok or not material then
+        NKM.GShaderLastError = "Material pp/nkm_deferred_lighting is unavailable"
+        return nil
+    end
+    local isErrorOK, isError = pcall(material.IsError, material)
+    if not isErrorOK or isError then
+        NKM.GShaderLastError = "Custom shader is not compiled/available (pp/nkm_deferred_lighting)"
+        return nil
+    end
+    NKM.GShaderDeferredMaterial = material
+    NKM.GShaderLastError = nil
+    return material
+end
+
+local function shouldBuildGShaderMask()
+    if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return false end
+    if NKM.GShaderMaskDebug then return true end
+    local lighting = NKM.ClientLighting
+    if not lighting or lighting.enabled ~= true then return false end
+    local deferred = lighting.deferred or nil
+    local hasDeferredWork = #(NKM.ClientDynamicLights or {}) > 0 or (deferred and deferred.ao == true)
+    return hasDeferredWork and getNKMDeferredMaterial() ~= nil
+end
+
+local function resetNKMStencilState()
+    render.SetStencilEnable(false)
+    render.SetStencilWriteMask(255)
+    render.SetStencilTestMask(255)
+    render.SetStencilReferenceValue(0)
+    render.SetStencilCompareFunction(STENCIL_ALWAYS)
+    render.SetStencilPassOperation(STENCIL_KEEP)
+    render.SetStencilFailOperation(STENCIL_KEEP)
+    render.SetStencilZFailOperation(STENCIL_KEEP)
+end
+
+local function clearNKMStencilBit()
+    render.SetStencilEnable(true)
+    render.SetStencilWriteMask(GSHADER_NKM_STENCIL_BIT)
+    render.SetStencilTestMask(0)
+    render.SetStencilReferenceValue(0)
+    render.SetStencilCompareFunction(STENCIL_ALWAYS)
+    render.SetStencilPassOperation(STENCIL_ZERO)
+    render.SetStencilFailOperation(STENCIL_KEEP)
+    render.SetStencilZFailOperation(STENCIL_KEEP)
+    render.PerformFullScreenStencilOperation()
+    resetNKMStencilState()
+end
+
+local function markVisibleNKMGeometry()
+    local drawCount = 0
+    if not NKM.RenderMeshes or #NKM.RenderMeshes == 0 then return 0 end
+
+    local ok, err = pcall(function()
+        render.SetStencilEnable(true)
+        render.SetStencilWriteMask(GSHADER_NKM_STENCIL_BIT)
+        render.SetStencilTestMask(0)
+        render.SetStencilReferenceValue(GSHADER_NKM_STENCIL_BIT)
+        render.SetStencilCompareFunction(STENCIL_ALWAYS)
+        render.SetStencilPassOperation(STENCIL_REPLACE)
+        render.SetStencilFailOperation(STENCIL_KEEP)
+        render.SetStencilZFailOperation(STENCIL_KEEP)
+        -- Keep the scene's depth test, but do not modify hardware depth while
+        -- stamping the NKM-only stencil bit. Failed depth pixels stay unmarked.
+        render.OverrideDepthEnable(true, true)
+        render.OverrideColorWriteEnable(true, false)
+
+        for _, entry in ipairs(NKM.RenderMeshes) do
+            local isBSPDisplacement = entry.isBSPDisplacement == true
+            local shouldDraw = not (isBSPDisplacement and NKM.ClientBSPDisplacementRenderEnabled == false)
+            if shouldDraw and entry.mesh and entry.mesh:IsValid() then
+                render.SetMaterial(GSHADER_MASK_MATERIAL)
+                entry.mesh:Draw()
+                drawCount = drawCount + 1
+            end
+        end
+    end)
+
+    -- Always release global render overrides, including after a failed IMesh draw.
+    render.OverrideColorWriteEnable(false, false)
+    render.OverrideDepthEnable(false, false)
+    render.SetBlend(1)
+    resetNKMStencilState()
+    NKM.GShaderLastMaskDraws = drawCount
+    if not ok then
+        NKM.GShaderLastError = "NKM stencil mask draw failed: " .. tostring(err)
+        return 0
+    end
+
+    NKM.GShaderMaskPassCount = (NKM.GShaderMaskPassCount or 0) + 1
+    return drawCount
+end
+
+local function configureNKMStencilTest()
+    render.SetStencilEnable(true)
+    render.SetStencilWriteMask(0)
+    render.SetStencilTestMask(GSHADER_NKM_STENCIL_BIT)
+    render.SetStencilReferenceValue(GSHADER_NKM_STENCIL_BIT)
+    render.SetStencilCompareFunction(STENCIL_EQUAL)
+    render.SetStencilPassOperation(STENCIL_KEEP)
+    render.SetStencilFailOperation(STENCIL_KEEP)
+    render.SetStencilZFailOperation(STENCIL_KEEP)
+end
+
+local function drawGShaderMaskDebug()
+    configureNKMStencilTest()
+    cam.Start2D()
+        surface.SetDrawColor(0, 210, 255, 80)
+        surface.DrawRect(0, 0, ScrW(), ScrH())
+    cam.End2D()
+    resetNKMStencilState()
+end
+
+local function drawNKMDeferredLighting(viewSetup)
+    if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return false end
+    if not updateGShaderDynamicLightLUT() then return false end
+
+    local material = getNKMDeferredMaterial()
+    if not material then return false end
+
+    local okMatrix, viewProjection = pcall(shaderlib.GetViewProjMatrix, viewSetup)
+    if not okMatrix or not viewProjection then
+        NKM.GShaderLastError = "GShader.GetViewProjMatrix failed"
+        return false
+    end
+
+    local lighting = NKM.ClientLighting or {}
+    local deferred = lighting.deferred or {}
+    local ok, err = pcall(function()
+        local setters = {
+            { material.SetMatrix, "$viewprojmat", viewProjection },
+            { material.SetFloat, "$c0_x", #(NKM.ClientDynamicLights or {}) },
+            { material.SetFloat, "$c0_y", deferred.aoRadius or 72 },
+            { material.SetFloat, "$c0_z", deferred.ao == false and 0 or (deferred.aoStrength or 0.35) },
+            { material.SetFloat, "$c0_w", deferred.contactShadows == false and 0 or 1 },
+            { material.SetFloat, "$c1_x", ScrW() },
+            { material.SetFloat, "$c1_y", ScrH() }
+        }
+        for _, setter in ipairs(setters) do
+            local succeeded, setError = pcall(setter[1], material, setter[2], setter[3])
+            if not succeeded then error(setError or ("failed to set " .. setter[2])) end
+        end
+
+        -- Update _rt_FullFrameFB only after all opaque NKM and BSP geometry has
+        -- been drawn. The stencil bit restricts the shader's writes to NKM pixels.
+        render.UpdateScreenEffectTexture()
+        configureNKMStencilTest()
+        render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
+        render.SetMaterial(material)
+        shaderlib.Draw3DScreenQuad()
+    end)
+
+    -- Do not leak blend or stencil state into Source translucent rendering.
+    render.OverrideBlend(false)
+    render.SetBlend(1)
+    resetNKMStencilState()
+    if not ok then
+        NKM.GShaderLastError = "NKM deferred shader pass failed: " .. tostring(err)
+        return false
+    end
+
+    NKM.GShaderDeferredPassCount = (NKM.GShaderDeferredPassCount or 0) + 1
+    NKM.GShaderLastError = nil
+    return true
+end
+
+function NKM.ClearClientMap()
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        destroyMeshList(chunk.renderMeshes)
+        chunk.renderMeshes = nil
+        chunk.collision = nil
+        chunk.triangleSurfaces = nil
+        chunk._nkmTraceCache = nil
+        chunk._nkmRenderSourceMeshes = nil
+        chunk.loaded = false
+    end
+
+    NKM.ClientChunks = {}
+    NKM.ClientChunkStats = nil
+    NKM.ClientManifest = nil
+    NKM.ClientMap = nil
+    NKM.ClientMapName = nil
+    NKM.ClientGeneration = nil
+    NKM.ClientLighting = nil
+    NKM.ClientDynamicLights = {}
+    NKM.GShaderLUTGeneration = nil
+    NKM.GShaderReadyFrame = false
+    NKM.ManifestTransfer = nil
+    NKM.ChunkTransfers = {}
+    NKM.LoadedClientChunkCount = 0
+    NKM.RenderMeshes = {}
+    NKM.TraceMap = nil
+end
+
+function NKM.UnloadClientChunk(chunk)
+    if not chunk or not chunk.loaded then return end
+
+    destroyMeshList(chunk.renderMeshes)
+    chunk.renderMeshes = nil
+    chunk.collision = nil
+    chunk.triangleSurfaces = nil
+    chunk._nkmTraceCache = nil
+    chunk._nkmRenderSourceMeshes = nil
+    chunk.loaded = false
+    chunk.requestPending = false
+    chunk.cacheChecked = false
+    rebuildLoadedMeshList()
+    rebuildClientTraceMap()
+end
+
+local function validateChunkPayload(payload, chunk)
+    if not istable(payload) then return false, "chunk payload is not a table" end
+    if payload.format ~= "NKM_CHUNK" or payload.version ~= NKM.Version then
+        return false, "unsupported chunk format/version"
+    end
+    if payload.name ~= NKM.ClientMapName or payload.id ~= chunk.id or payload.index ~= chunk.index
+        or payload.ix ~= chunk.ix or payload.iy ~= chunk.iy or payload.iz ~= chunk.iz then
+        return false, "chunk identity mismatch"
+    end
+    if not istable(payload.meshes) or not istable(payload.collision)
+        or not istable(payload.triangleSurfaces) then
+        return false, "chunk mesh/collision/triangle surface arrays are missing"
+    end
+    if #payload.meshes ~= chunk.meshGroupCount or #payload.collision ~= chunk.collisionCount
+        or #payload.triangleSurfaces ~= (chunk.triangleSurfaceCount or 0) then
+        return false, "chunk content counts do not match manifest"
+    end
+
+    -- Reuse the central map validator. Collision-only chunks get a temporary
+    -- validation triangle that is never passed to the renderer.
+    local validationMeshes = payload.meshes
+    if #validationMeshes == 0 then
+        validationMeshes = {
+            {
+                material = "nkm_validation",
+                vertices = {
+                    { p = { 0, 0, 0 } },
+                    { p = { 1, 0, 0 } },
+                    { p = { 0, 1, 1 } }
+                }
+            }
+        }
+    end
+
+    local valid, detail = NKM.ValidateMap({
+        format = NKM.FormatMagic,
+        version = NKM.Version,
+        name = NKM.ClientMapName,
+        meshes = validationMeshes,
+        collision = payload.collision,
+        triangleSurfaces = payload.triangleSurfaces
+    })
+    if not valid then return false, detail end
+    return true
+end
+
+function NKM.ApplyClientChunk(chunkIndex, payload)
+    local applyStartedAt = NKM.PerfBegin()
+    local chunk = NKM.ClientChunks[chunkIndex]
+    if not chunk then return false, "unknown chunk index" end
+    chunk.requestPending = false
+
+    if not chunk.wanted then
+        return false, "chunk is no longer within load distance"
+    end
+
+    local validateStartedAt = NKM.PerfBegin()
+    local valid, detail = validateChunkPayload(payload, chunk)
+    NKM.PerfRecord("chunk_validate", validateStartedAt)
+    if not valid then
+        chunk.retryAt = CurTime() + 2
+        NKM.PerfRecord("chunk_apply", applyStartedAt)
+        return false, "validation failed: " .. tostring(detail)
+    end
+
+    local meshStartedAt = NKM.PerfBegin()
+    local meshes, meshError = buildChunkRenderMeshes(payload.meshes, chunk.id)
+    NKM.PerfRecord("mesh_build", meshStartedAt)
+    if not meshes then
+        chunk.retryAt = CurTime() + 2
+        NKM.PerfRecord("chunk_apply", applyStartedAt)
+        return false, meshError
+    end
+
+    chunk.renderMeshes = meshes
+    chunk._nkmRenderSourceMeshes = nil
+    for _, meshGroup in ipairs(payload.meshes or {}) do
+        if meshGroup.isBSPDisplacement == true then
+            -- Keep source vertices only for imported BSP chunks so the diagnostic
+            -- offset can rebuild their IMesh without changing physics or trace data.
+            chunk._nkmRenderSourceMeshes = payload.meshes
+            break
+        end
+    end
+    chunk.collision = payload.collision
+    chunk.triangleSurfaces = payload.triangleSurfaces
+    chunk.loaded = true
+    chunk.loadedAt = CurTime()
+    chunk.cacheChecked = true
+    chunk.meshes = nil -- Parsed render vertices are discarded after IMesh creation.
+
+    rebuildLoadedMeshList()
+    rebuildClientTraceMap()
+    NKM.PerfRecord("chunk_apply", applyStartedAt)
+    NKM.PerfAdd("chunks_applied", 1)
+    return true
+end
+
+
+function NKM.RebuildBSPDisplacementRenderMeshes()
+    local rebuiltChunks = 0
+    local failedChunks = 0
+
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        if chunk.loaded and istable(chunk._nkmRenderSourceMeshes) then
+            local replacement, err = buildChunkRenderMeshes(chunk._nkmRenderSourceMeshes, chunk.id)
+            if replacement then
+                destroyMeshList(chunk.renderMeshes)
+                chunk.renderMeshes = replacement
+                rebuiltChunks = rebuiltChunks + 1
+            else
+                failedChunks = failedChunks + 1
+                ErrorNoHalt("[NKM] BSP displacement mesh rebuild failed for chunk "
+                    .. tostring(chunk.id) .. ": " .. tostring(err) .. "\n")
+            end
+        end
+    end
+
+    rebuildLoadedMeshList()
+    return rebuiltChunks, failedChunks
+end
+
+local function printBSPDisplacementClientInfo()
+    local groups, vertices = 0, 0
+    local missingUV, invalidUV = 0, 0
+    local minU, minV, maxU, maxV = math.huge, math.huge, -math.huge, -math.huge
+    local materials = {}
+    local patchIDs = {}
+    local vertexLit = 0
+    local litPatches = {}
+    local lightmapSamples = 0
+    local minLight, maxLight = math.huge, -math.huge
+
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        if chunk.loaded then
+            for _, group in ipairs(chunk._nkmRenderSourceMeshes or {}) do
+                if group.isBSPDisplacement == true then
+                    groups = groups + 1
+                    materials[group.material or "<none>"] = true
+                    local patchKey = tostring(group.sourcePatchID or group.sourceGroup or "?")
+                    patchIDs[patchKey] = true
+                    if group.hasVertexLighting then litPatches[patchKey] = true end
+                    lightmapSamples = lightmapSamples + (group.lightmapSamples or 0)
+                    for _, vertex in ipairs(group.vertices or {}) do
+                        vertices = vertices + 1
+                        local color = vertex.color
+                        if group.hasVertexLighting and istable(color)
+                            and isnumber(color[1]) and isnumber(color[2]) and isnumber(color[3]) then
+                            vertexLit = vertexLit + 1
+                            local light = (color[1] + color[2] + color[3]) / 3
+                            minLight = math.min(minLight, light)
+                            maxLight = math.max(maxLight, light)
+                        end
+                        local uv = vertex.uv
+                        if not istable(uv) then
+                            missingUV = missingUV + 1
+                        elseif not isnumber(uv[1]) or not isnumber(uv[2])
+                            or uv[1] ~= uv[1] or uv[2] ~= uv[2]
+                            or uv[1] == math.huge or uv[1] == -math.huge
+                            or uv[2] == math.huge or uv[2] == -math.huge then
+                            invalidUV = invalidUV + 1
+                        else
+                            minU = math.min(minU, uv[1])
+                            minV = math.min(minV, uv[2])
+                            maxU = math.max(maxU, uv[1])
+                            maxV = math.max(maxV, uv[2])
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local materialNames = {}
+    local errorMaterials = 0
+    for name in pairs(materials) do
+        materialNames[#materialNames + 1] = name
+        local ok, mat = pcall(Material, name)
+        if not ok or not mat then
+            errorMaterials = errorMaterials + 1
+        else
+            local checkOK, isError = pcall(mat.IsError, mat)
+            if not checkOK or isError then errorMaterials = errorMaterials + 1 end
+        end
+    end
+    table.sort(materialNames)
+
+    print(string.format("[NKM] BSP displacement client: groups=%d patches=%d vertices=%d",
+        groups, table.Count(patchIDs), vertices))
+    print(string.format("[NKM] UV: missing=%d invalid=%d rangeU=[%.4f, %.4f] rangeV=[%.4f, %.4f]",
+        missingUV, invalidUV,
+        minU == math.huge and 0 or minU, maxU == -math.huge and 0 or maxU,
+        minV == math.huge and 0 or minV, maxV == -math.huge and 0 or maxV))
+    print(string.format("[NKM] Materials: %d, missing/error=%d: %s",
+        #materialNames, errorMaterials, table.concat(materialNames, ", ")))
+    print(string.format("[NKM] BSP vertex lighting: patches=%d/%d renderVertices=%d/%d luxelSamples=%d averageRGB-range=[%.1f, %.1f]",
+        table.Count(litPatches), table.Count(patchIDs), vertexLit, vertices, lightmapSamples,
+        minLight == math.huge and 0 or minLight, maxLight == -math.huge and 0 or maxLight))
+    for _, name in ipairs(materialNames) do
+        local ok, mat = pcall(Material, name)
+        if ok and mat then
+            print(string.format("[NKM] Material '%s': shader=%s basetexture=%s basetexture2=%s",
+                name, getSafeMaterialShader(mat) or "<unknown>",
+                getSafeMaterialString(mat, "$basetexture") or "<none>",
+                getSafeMaterialString(mat, "$basetexture2") or "<none>"))
+        end
+    end
+    print(string.format("[NKM] Render: enabled=%s debug=%s materialMode=%s normalOffset=%.3f units",
+        tostring(NKM.ClientBSPDisplacementRenderEnabled), tostring(NKM.ClientBSPDisplacementDebug),
+        tostring(NKM.ClientBSPDisplacementMaterialMode), NKM.ClientBSPDisplacementRenderOffset or 0))
+end
+
+function NKM.ApplyClientManifest(manifest, generation)
+    if not istable(manifest) or manifest.format ~= "NKM_MANIFEST" then
+        return false, "invalid manifest format"
+    end
+    if manifest.version ~= NKM.Version or not NKM.IsValidMapName(manifest.mapName) then
+        return false, "unsupported manifest version or map name"
+    end
+    if manifest.generation ~= generation then
+        return false, "manifest generation mismatch"
+    end
+    if not istable(manifest.chunks) or #manifest.chunks > NKM.MaxChunks then
+        return false, "invalid manifest chunk list"
+    end
+
+    local newChunks = {}
+    local seenIDs = {}
+    for index, meta in ipairs(manifest.chunks) do
+        if not istable(meta) or not isstring(meta.id) or #meta.id > 64 or seenIDs[meta.id] then
+            return false, "invalid or duplicate chunk ID at index " .. index
+        end
+        if not istable(meta.mins) or not istable(meta.maxs)
+            or not isFiniteNumber(meta.mins[1]) or not isFiniteNumber(meta.mins[2]) or not isFiniteNumber(meta.mins[3])
+            or not isFiniteNumber(meta.maxs[1]) or not isFiniteNumber(meta.maxs[2]) or not isFiniteNumber(meta.maxs[3])
+            or meta.mins[1] > meta.maxs[1] or meta.mins[2] > meta.maxs[2] or meta.mins[3] > meta.maxs[3] then
+            return false, "invalid chunk bounds at index " .. index
+        end
+        if not isFiniteNumber(meta.bytes) or meta.bytes < 1 or meta.bytes > NKM.MaxMapBytes
+            or not isstring(meta.checksum) or #meta.checksum < 1 or #meta.checksum > 16
+            or not meta.checksum:match("^[%w]+$")
+            or not isnumber(meta.meshGroups) or meta.meshGroups < 0
+            or not isnumber(meta.collisionCount) or meta.collisionCount < 0
+            or (meta.triangleSurfaceCount ~= nil and (not isnumber(meta.triangleSurfaceCount) or meta.triangleSurfaceCount < 0)) then
+            return false, "invalid chunk size/checksum/counts at index " .. index
+        end
+
+        seenIDs[meta.id] = true
+        newChunks[index] = {
+            id = meta.id,
+            index = index,
+            ix = meta.ix or 0,
+            iy = meta.iy or 0,
+            iz = meta.iz or 0,
+            mins = Vector(meta.mins[1], meta.mins[2], meta.mins[3]),
+            maxs = Vector(meta.maxs[1], meta.maxs[2], meta.maxs[3]),
+            expectedBytes = meta.bytes,
+            checksum = meta.checksum,
+            meshGroupCount = meta.meshGroups or 0,
+            collisionCount = meta.collisionCount or 0,
+            triangleSurfaceCount = meta.triangleSurfaceCount or 0,
+            renderMeshes = nil,
+            collision = nil,
+            loaded = false,
+            wanted = false,
+            requestPending = false,
+            retryAt = 0
+        }
+    end
+
+    NKM.ClearClientMap()
+    NKM.ClientManifest = manifest
+    NKM.ClientMap = manifest
+    NKM.ClientMapName = manifest.mapName
+    NKM.ClientGeneration = generation
+    setClientLightingSettings(manifest.lighting)
+    NKM.ClientChunks = newChunks
+    NKM.ClientChunkStats = {
+        chunkSize = manifest.chunkSize or NKM.DefaultChunkSize,
+        chunkCount = #newChunks
+    }
+    NKM.CleanChunkCache(manifest, newChunks)
+    NKM.NextChunkRequestAt = 0
+
+    print(string.format("[NKM] Manifest received: '%s', %d chunks (payload is streamed on demand)",
+        manifest.mapName, #newChunks))
+    NKM.UpdateChunkStreaming(true)
+    return true
+end
+
+function NKM.UpdateChunkStreaming(force)
+    if not NKM.ClientChunks or #NKM.ClientChunks == 0 then return end
+
+    local now = CurTime()
+    if not force and now < (NKM.NextChunkUpdate or 0) then return end
+    NKM.NextChunkUpdate = now + 0.25
+
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return end
+
+    local position = ply:GetPos()
+    local loadDistanceSqr = NKM.ChunkLoadDistance * NKM.ChunkLoadDistance
+    local unloadDistanceSqr = NKM.ChunkUnloadDistance * NKM.ChunkUnloadDistance
+    local loadedCount = 0
+    local requestQueue = {}
+
+    -- First pass updates residency and collects missing chunks. Requests are
+    -- sent only after sorting by distance, so nearby geometry always wins.
+    for _, chunk in ipairs(NKM.ClientChunks) do
+        local distanceSqr = distanceSqrToBounds(position, chunk.mins, chunk.maxs)
+        chunk.distanceSqr = distanceSqr
+        chunk.wanted = distanceSqr <= loadDistanceSqr
+
+        if chunk.loaded then
+            if distanceSqr > unloadDistanceSqr then
+                NKM.UnloadClientChunk(chunk)
+            else
+                loadedCount = loadedCount + 1
+            end
+        elseif chunk.requestPending then
+            if now - (chunk.requestTime or now) > 3 then
+                chunk.requestPending = false
+                chunk.retryAt = now + 1
+            end
+        elseif chunk.wanted and now >= (chunk.retryAt or 0) then
+            requestQueue[#requestQueue + 1] = chunk
+        end
+    end
+
+    table.sort(requestQueue, function(a, b)
+        if a.distanceSqr ~= b.distanceSqr then
+            return a.distanceSqr < b.distanceSqr
+        end
+        return a.id < b.id
+    end)
+
+    if #requestQueue > 0 then
+        local chunk = requestQueue[1]
+        if not chunk.cacheChecked then
+            chunk.cacheChecked = true
+            local cachedPayload, cacheState = NKM.ReadChunkCache(chunk)
+            if cachedPayload then
+                local ok, err = NKM.ApplyClientChunk(chunk.index, cachedPayload)
+                if ok then
+                    addCacheStat("Hits")
+                    NKM.LastChunkCacheSource = "disk"
+                    NKM.LastChunkCacheChunk = chunk.id
+                    NKM.NextChunkUpdate = 0
+                    return
+                end
+
+                local path = getChunkCachePath(chunk)
+                if path then file.Delete(path) end
+                addCacheStat("Corruptions")
+                addCacheStat("Evictions")
+                chunk.cacheChecked = false
+                chunk.retryAt = now + 0.5
+                print("[NKM] Cached chunk rejected " .. chunk.id .. ": " .. tostring(err))
+                return
+            end
+            if cacheState == "miss" or cacheState == "corrupt" or cacheState == "invalid JSON" then
+                NKM.LastChunkCacheSource = "network"
+            end
+        end
+    end
+
+    if #requestQueue > 0 and now >= (NKM.NextChunkRequestAt or 0) then
+        local chunk = requestQueue[1]
+        net.Start("nkm_chunk_request")
+            net.WriteUInt(NKM.ClientGeneration or 0, 16)
+            net.WriteUInt(chunk.index, 16)
+        net.SendToServer()
+
+        chunk.requestPending = true
+        chunk.requestTime = now
+        NKM.NextChunkRequestAt = now + 0.12
+    end
+
+    NKM.LoadedClientChunkCount = loadedCount
+    NKM.LastChunkRequestQueueSize = #requestQueue
+end
+
+net.Receive("nkm_manifest_begin", function()
+    local generation = net.ReadUInt(16)
+    local mapName = net.ReadString()
+    local totalParts = net.ReadUInt(16)
+    local totalBytes = net.ReadUInt(32)
+    local checksum = net.ReadString()
+
+    if totalBytes < 1 or totalBytes > NKM.MaxManifestBytes or totalParts < 1 then
+        NKM.ManifestTransfer = nil
+        print("[NKM] Rejected manifest transfer: invalid size/part count")
+        return
+    end
+
+    NKM.ManifestTransfer = {
+        generation = generation,
+        mapName = mapName,
+        totalParts = totalParts,
+        totalBytes = totalBytes,
+        checksum = checksum,
+        parts = {},
+        received = 0
+    }
+end)
+
+net.Receive("nkm_manifest_data", function()
+    local generation = net.ReadUInt(16)
+    local partIndex = net.ReadUInt(16)
+    local length = net.ReadUInt(16)
+    local data = net.ReadData(length)
+    local transfer = NKM.ManifestTransfer
+
+    if not transfer or transfer.generation ~= generation or not data then return end
+    if partIndex < 1 or partIndex > transfer.totalParts or transfer.parts[partIndex] then return end
+
+    transfer.parts[partIndex] = data
+    transfer.received = transfer.received + 1
+    if transfer.received ~= transfer.totalParts then return end
+
+    local payload = table.concat(transfer.parts)
+    NKM.ManifestTransfer = nil
+    if #payload ~= transfer.totalBytes or util.CRC(payload) ~= transfer.checksum then
+        print("[NKM] Manifest transfer failed: size/checksum mismatch")
+        return
+    end
+
+    local manifest = util.JSONToTable(payload)
+    if not manifest or manifest.mapName ~= transfer.mapName then
+        print("[NKM] Manifest transfer failed: invalid JSON or map name mismatch")
+        return
+    end
+
+    local ok, err = NKM.ApplyClientManifest(manifest, generation)
+    if not ok then
+        print("[NKM] Manifest rejected: " .. tostring(err))
+    end
+end)
+
+net.Receive("nkm_chunk_begin", function()
+    local generation = net.ReadUInt(16)
+    local chunkIndex = net.ReadUInt(16)
+    local totalParts = net.ReadUInt(16)
+    local totalBytes = net.ReadUInt(32)
+    local checksum = net.ReadString()
+
+    if generation ~= NKM.ClientGeneration then return end
+    local chunk = NKM.ClientChunks[chunkIndex]
+    if not chunk or totalBytes < 1 or totalBytes > NKM.MaxMapBytes or totalParts < 1 then return end
+
+    local key = tostring(generation) .. ":" .. tostring(chunkIndex)
+    NKM.ChunkTransfers[key] = {
+        generation = generation,
+        chunkIndex = chunkIndex,
+        totalParts = totalParts,
+        totalBytes = totalBytes,
+        checksum = checksum,
+        parts = {},
+        received = 0
+    }
+end)
+
+net.Receive("nkm_chunk_data", function()
+    local generation = net.ReadUInt(16)
+    local chunkIndex = net.ReadUInt(16)
+    local partIndex = net.ReadUInt(16)
+    local length = net.ReadUInt(16)
+    local data = net.ReadData(length)
+    local key = tostring(generation) .. ":" .. tostring(chunkIndex)
+    local transfer = NKM.ChunkTransfers[key]
+
+    if not transfer or not data then return end
+    if partIndex < 1 or partIndex > transfer.totalParts or transfer.parts[partIndex] then return end
+
+    transfer.parts[partIndex] = data
+    transfer.received = transfer.received + 1
+    if transfer.received ~= transfer.totalParts then return end
+
+    NKM.ChunkTransfers[key] = nil
+    local transferStartedAt = NKM.PerfBegin()
+    local payload = table.concat(transfer.parts)
+    local chunk = NKM.ClientChunks[chunkIndex]
+    if not chunk then return end
+
+    if #payload ~= transfer.totalBytes or #payload ~= chunk.expectedBytes
+        or util.CRC(payload) ~= transfer.checksum or transfer.checksum ~= chunk.checksum then
+        chunk.requestPending = false
+        chunk.retryAt = CurTime() + 2
+        print("[NKM] Chunk transfer failed: size/checksum mismatch for " .. chunk.id)
+        return
+    end
+
+    local decodeStartedAt = NKM.PerfBegin()
+    local decoded = util.JSONToTable(payload)
+    NKM.PerfRecord("network_json_decode", decodeStartedAt)
+    NKM.PerfRecord("network_chunk_receive", transferStartedAt)
+    NKM.PerfAdd("network_chunk_bytes", #payload)
+    if not decoded then
+        chunk.requestPending = false
+        chunk.retryAt = CurTime() + 2
+        print("[NKM] Chunk transfer failed: invalid JSON for " .. chunk.id)
+        return
+    end
+
+    local ok, err = NKM.ApplyClientChunk(chunkIndex, decoded)
+    if ok then
+        local cached, cacheError = NKM.WriteChunkCache(chunk, payload)
+        if not cached then
+            print("[NKM] Could not cache chunk " .. chunk.id .. ": " .. tostring(cacheError))
+        else
+            NKM.LastChunkCacheSource = "network (cached)"
+            NKM.LastChunkCacheChunk = chunk.id
+        end
+    elseif err ~= "chunk is no longer within load distance" then
+        print("[NKM] Could not apply chunk " .. chunk.id .. ": " .. tostring(err))
+    end
+end)
+
+net.Receive("nkm_map_clear", function()
+    NKM.ClearClientMap()
+    print("[NKM] Client map unloaded")
+end)
+
+hook.Add("Think", "NKM.ChunkStreaming", function()
+    NKM.UpdateChunkStreaming(false)
+end)
+
+local function getBSPDisplacementDebugColor(sourcePatchID)
+    local text = tostring(sourcePatchID or "nkm")
+    local hash = 0
+    for index = 1, #text do
+        hash = (hash * 33 + string.byte(text, index)) % 104729
+    end
+    return 0.55 + (hash % 45) / 100,
+        0.55 + (math.floor(hash / 7) % 45) / 100,
+        0.55 + (math.floor(hash / 31) % 45) / 100
+end
+
+hook.Add("PreDrawOpaqueRenderables", "NKM.GShaderStencilClear", function(bDrawingDepth, bDrawingSkybox)
+    if bDrawingDepth or bDrawingSkybox then return end
+    NKM.GShaderReadyFrame = false
+    if shouldBuildGShaderMask() then clearNKMStencilBit() end
+end)
+
+hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, bDrawingSkybox)
+    if bDrawingSkybox then return end
+
+    -- GShader asks the engine for an additional depth pass. Draw NKM meshes in
+    -- that pass too, using Source's DepthWrite shader so its reconstructed
+    -- WorldPos/Normals include NKM geometry as well as the BSP scene.
+    if bDrawingDepth then
+        if NKM.GShaderBridgeEnabled and hasGShaderAPI() and shouldBuildGShaderMask() and #NKM.RenderMeshes > 0 then
+            local ok, err = pcall(function()
+                render.CullMode(NKM.CullModeSetting == 1 and MATERIAL_CULLMODE_CW or MATERIAL_CULLMODE_CCW)
+                render.OverrideDepthEnable(true, true)
+                for _, entry in ipairs(NKM.RenderMeshes) do
+                    local isBSPDisplacement = entry.isBSPDisplacement == true
+                    local shouldDraw = not (isBSPDisplacement and NKM.ClientBSPDisplacementRenderEnabled == false)
+                    if shouldDraw and entry.mesh and entry.mesh:IsValid() then
+                        render.SetMaterial(GSHADER_DEPTH_MATERIAL)
+                        entry.mesh:Draw()
+                    end
+                end
+            end)
+            render.OverrideDepthEnable(false, false)
+            render.CullMode(MATERIAL_CULLMODE_CCW)
+            render.SetBlend(1)
+            if not ok then
+                NKM.GShaderLastError = "NKM GShader depth pre-pass failed: " .. tostring(err)
+            end
+        end
+        return
+    end
+
+    if #NKM.RenderMeshes == 0 then return end
+
+    render.CullMode(NKM.CullModeSetting == 1 and MATERIAL_CULLMODE_CW or MATERIAL_CULLMODE_CCW)
+
+    -- Some vertex-alpha/unlit material combinations or other render hooks can
+    -- leave depth writes disabled for this pass. Keep normal depth testing, but
+    -- explicitly require every opaque NKM surface to update the Z-buffer so
+    -- later meshes cannot draw through nearer NKM walls.
+    render.OverrideDepthEnable(true, true)
+
+    for _, entry in ipairs(NKM.RenderMeshes) do
+        local isBSPDisplacement = entry.isBSPDisplacement == true
+        local shouldDraw = not (isBSPDisplacement and NKM.ClientBSPDisplacementRenderEnabled == false)
+
+        if shouldDraw and entry.mesh and entry.mesh:IsValid() then
+            if isBSPDisplacement and NKM.ClientBSPDisplacementDebug then
+                render.SetMaterial(BSP_DISPLACEMENT_DEBUG_MATERIAL)
+                local r, g, b = getBSPDisplacementDebugColor(entry.sourcePatchID)
+                render.SetColorModulation(r, g, b)
+                render.SetBlend(1)
+                entry.mesh:Draw()
+                render.SetColorModulation(1, 1, 1)
+            elseif isBSPDisplacement and (NKM.ClientBSPDisplacementMaterialMode == "albedo"
+                or NKM.ClientBSPDisplacementMaterialMode == "lit") then
+                -- WorldVertexTransition is reproduced with two UnlitGeneric passes.
+                -- In lit mode, BSP LDR light samples are barycentrically transferred
+                -- to displacement grid vertices and applied through vertex color.
+                render.SetColorModulation(1, 1, 1)
+                render.SetBlend(1)
+                render.SetMaterial(entry.albedoMaterial or DEFAULT_MATERIAL)
+                entry.mesh:Draw()
+                if entry.blendMesh and entry.blendMesh:IsValid() and entry.blendMaterial then
+                    render.SetMaterial(entry.blendMaterial)
+                    entry.blendMesh:Draw()
+                end
+            elseif entry.hasNKMLighting and not isBSPDisplacement then
+                render.SetMaterial(entry.nkmLightingMaterial or DEFAULT_MATERIAL)
+                render.SetColorModulation(1, 1, 1)
+                render.SetBlend(1)
+                entry.mesh:Draw()
+            else
+                render.SetMaterial(entry.material)
+                render.SetColorModulation(1, 1, 1)
+                render.SetBlend(1)
+                entry.mesh:Draw()
+            end
+        end
+    end
+    -- Release the override after the NKM pass; do not leak it into Source
+    -- translucent rendering, viewmodels, or other addons.
+    render.OverrideDepthEnable(false, false)
+    render.CullMode(MATERIAL_CULLMODE_CCW)
+    render.SetColorModulation(1, 1, 1)
+    render.SetBlend(1)
+end)
+
+-- GShader's deferred hook is executed after it reconstructs _rt_WPDepth and
+-- _rt_NormalsTangents. We cache the view setup here, then apply the NKM-only
+-- screen pass in PreDrawTranslucentRenderables, after every PostDrawOpaque hook
+-- has finished. This avoids dependence on addon hook ordering.
+hook.Add("PostDrawReconstructionLighting", "NKM.GShaderBridgeReady", function(viewSetup)
+    if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return end
+    local ok, canDraw = pcall(shaderlib.CanDrawEffects, viewSetup)
+    if not ok or not canDraw then return end
+    NKM.GShaderReadyFrame = true
+    NKM.GShaderLastViewSetup = viewSetup
+    NKM.GShaderLastHookAt = RealTime()
+end)
+
+hook.Add("PreDrawTranslucentRenderables", "NKM.GShaderDeferredPass", function(bDrawingDepth, bDrawingSkybox)
+    if bDrawingDepth or bDrawingSkybox then return end
+    if not NKM.GShaderReadyFrame then return end
+    NKM.GShaderReadyFrame = false
+    if not shouldBuildGShaderMask() then return end
+
+    markVisibleNKMGeometry()
+    if NKM.GShaderMaskDebug then
+        drawGShaderMaskDebug()
+        return
+    end
+
+    if not drawNKMDeferredLighting(NKM.GShaderLastViewSetup) then
+        if NKM.GShaderLastError then
+            NKM.GShaderLastStatusPrintAt = NKM.GShaderLastStatusPrintAt or 0
+            if RealTime() >= NKM.GShaderLastStatusPrintAt then
+                NKM.GShaderLastStatusPrintAt = RealTime() + 5
+                print("[NKM] GShader deferred pass skipped: " .. tostring(NKM.GShaderLastError))
+            end
+        end
+    end
+end)
+
+
+concommand.Add("nkm_lighting_status", function()
+    local hasLighting = false
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        for _, group in ipairs(chunk.renderMeshes or {}) do
+            if group.hasNKMLighting then
+                hasLighting = true
+                break
+            end
+        end
+        if hasLighting then break end
+    end
+
+    local gshaderAvailable = hasGShaderAPI()
+    print("[NKM] Lighting: " .. (hasLighting and "NKM vertex lighting present" or "no NKM vertex bake in active map"))
+    print("[NKM] GShader: " .. (gshaderAvailable and "detected" or "not detected")
+        .. "; dynamic point lights=" .. tostring(#(NKM.ClientDynamicLights or {})))
+    print("[NKM] Deferred: bridge=" .. tostring(NKM.GShaderBridgeEnabled == true)
+        .. " maskDebug=" .. tostring(NKM.GShaderMaskDebug == true)
+        .. " maskPasses=" .. tostring(NKM.GShaderMaskPassCount or 0)
+        .. " shaderPasses=" .. tostring(NKM.GShaderDeferredPassCount or 0))
+    print("[NKM] GShader material: " .. (getNKMDeferredMaterial() and "compiled/available" or tostring(NKM.GShaderLastError or "unavailable")))
+    print("[NKM] GShader LUT: " .. (NKM.GShaderLUTGeneration == NKM.ClientGeneration and "uploaded" or "not uploaded")
+        .. (NKM.GShaderLUTLastError and (" (" .. tostring(NKM.GShaderLUTLastError) .. ")") or ""))
+    print("[NKM] NKM baked lighting remains independent; deferred mask prevents the custom point-light/AO pass from affecting BSP pixels.")
+end)
+
+concommand.Add("nkm_gshader_status", function()
+    local available = hasGShaderAPI()
+    local material = getNKMDeferredMaterial()
+    print("[NKM] GShader available: " .. tostring(available))
+    print("[NKM] GShader bridge enabled: " .. tostring(NKM.GShaderBridgeEnabled == true))
+    print("[NKM] Reconstruction hook seen: " .. tostring(NKM.GShaderLastHookAt ~= nil)
+        .. (NKM.GShaderLastHookAt and string.format(" (%.2fs ago)", math.max(0, RealTime() - NKM.GShaderLastHookAt)) or ""))
+    print("[NKM] NKM dynamic point lights: " .. tostring(#(NKM.ClientDynamicLights or {})))
+    print("[NKM] NKM stencil mask debug: " .. tostring(NKM.GShaderMaskDebug == true)
+        .. "; mask passes=" .. tostring(NKM.GShaderMaskPassCount or 0)
+        .. "; last mask meshes=" .. tostring(NKM.GShaderLastMaskDraws or 0))
+    print("[NKM] Deferred shader material: " .. tostring(material ~= nil))
+    print("[NKM] LUT uploaded: " .. tostring(NKM.GShaderLUTGeneration == NKM.ClientGeneration))
+    if NKM.GShaderLUTLastError then print("[NKM] LUT error: " .. tostring(NKM.GShaderLUTLastError)) end
+    if NKM.GShaderLastError then print("[NKM] Last error: " .. tostring(NKM.GShaderLastError)) end
+end)
+
+concommand.Add("nkm_gshader_debug_mask", function(_, _, args)
+    local value = args and args[1]
+    if value == "1" then
+        NKM.GShaderMaskDebug = true
+    elseif value == "0" then
+        NKM.GShaderMaskDebug = false
+    elseif value ~= nil then
+        print("[NKM] Usage: nkm_gshader_debug_mask [0|1]")
+        return
+    end
+    print("[NKM] GShader NKM mask debug: " .. tostring(NKM.GShaderMaskDebug))
+end)
+
+concommand.Add("nkm_gshader_enable", function(_, _, args)
+    local value = args and args[1]
+    if value == "1" then
+        NKM.GShaderBridgeEnabled = true
+    elseif value == "0" then
+        NKM.GShaderBridgeEnabled = false
+        NKM.GShaderReadyFrame = false
+    elseif value ~= nil then
+        print("[NKM] Usage: nkm_gshader_enable [0|1]")
+        return
+    end
+    print("[NKM] GShader bridge: " .. tostring(NKM.GShaderBridgeEnabled))
+end)
+
+concommand.Add("nkm_bspdisp_render", function(_, _, args)
+    local value = args and args[1]
+    if value == "0" then
+        NKM.ClientBSPDisplacementRenderEnabled = false
+    elseif value == "1" then
+        NKM.ClientBSPDisplacementRenderEnabled = true
+    elseif value ~= nil then
+        print("[NKM] Usage: nkm_bspdisp_render [0|1]")
+        return
+    end
+    print("[NKM] BSP displacement rendering: "
+        .. (NKM.ClientBSPDisplacementRenderEnabled and "enabled" or "disabled"))
+end)
+
+concommand.Add("nkm_bspdisp_debug", function(_, _, args)
+    local value = args and args[1]
+    if value == "0" then
+        NKM.ClientBSPDisplacementDebug = false
+    elseif value == "1" then
+        NKM.ClientBSPDisplacementDebug = true
+    elseif value ~= nil then
+        print("[NKM] Usage: nkm_bspdisp_debug [0|1]")
+        return
+    end
+    print("[NKM] BSP displacement debug material: "
+        .. (NKM.ClientBSPDisplacementDebug and "enabled" or "disabled"))
+end)
+
+concommand.Add("nkm_bspdisp_material", function(_, _, args)
+    local mode = string.lower(tostring(args and args[1] or ""))
+    if mode ~= "albedo" and mode ~= "lit" and mode ~= "source" then
+        print("[NKM] Usage: nkm_bspdisp_material <albedo|lit|source>")
+        return
+    end
+    NKM.ClientBSPDisplacementMaterialMode = mode
+    local rebuilt, failed = NKM.RebuildBSPDisplacementRenderMeshes()
+    print("[NKM] BSP displacement material mode: " .. mode .. "; rebuilt chunks=" .. rebuilt .. " failed=" .. failed)
+    if mode == "albedo" then
+        print("[NKM] Uses stable UnlitGeneric texture wrappers; BSP vertex lighting is ignored.")
+    elseif mode == "lit" then
+        print("[NKM] Uses UnlitGeneric albedo + BSP LDR per-vertex light approximation; WVT alpha blend is preserved.")
+        print("[NKM] This is not exact LightmappedGeneric, HDR, animated lightstyles or bump-lightmap rendering.")
+    else
+        print("[NKM] Uses original BSP materials; world-only shaders may be unsupported on IMesh.")
+    end
+end)
+
+concommand.Add("nkm_bspdisp_offset", function(_, _, args)
+    local value = tonumber(args and args[1])
+    if not value or value ~= value or value == math.huge or value == -math.huge then
+        print("[NKM] Usage: nkm_bspdisp_offset <signed units> (range -16..16)")
+        print("[NKM] Positive values move along vertex normals; negative values move against them.")
+        return
+    end
+    value = math.Clamp(value, -16, 16)
+    NKM.ClientBSPDisplacementRenderOffset = value
+    local rebuilt, failed = NKM.RebuildBSPDisplacementRenderMeshes()
+    print(string.format("[NKM] BSP displacement render offset: %.3f units; rebuilt chunks=%d failed=%d",
+        value, rebuilt, failed))
+    print("[NKM] Offset changes render meshes only; VPhysics and Trace coordinates are unchanged.")
+end)
+
+concommand.Add("nkm_bspdisp_client_info", function()
+    printBSPDisplacementClientInfo()
+end)
+
+concommand.Add("nkm_client_status", function()
+    local loadedCollisionChunks = 0
+    local loadedCollisionConvexes = 0
+    local loadedTrianglePatches = 0
+    local loadedTriangleCount = 0
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        if chunk.loaded and ((chunk.collision and #chunk.collision > 0)
+            or (chunk.triangleSurfaces and #chunk.triangleSurfaces > 0)) then
+            loadedCollisionChunks = loadedCollisionChunks + 1
+            loadedCollisionConvexes = loadedCollisionConvexes + #(chunk.collision or {})
+            loadedTrianglePatches = loadedTrianglePatches + #(chunk.triangleSurfaces or {})
+            for _, surfaceData in ipairs(chunk.triangleSurfaces or {}) do
+                loadedTriangleCount = loadedTriangleCount + #(surfaceData.vertices or {}) / 3
+            end
+        end
+    end
+
+    print("[NKM] Client map: " .. tostring(NKM.ClientMapName or "none"))
+    print(string.format("[NKM] Lua heap: %.1f MB (excludes native IMesh allocations)", collectgarbage("count") / 1024))
+    print("[NKM] Generation: " .. tostring(NKM.ClientGeneration or "none"))
+    print("[NKM] Render meshes: " .. #NKM.RenderMeshes)
+    print("[NKM] Chunks loaded: " .. tostring(NKM.LoadedClientChunkCount or 0) .. "/" .. tostring(#NKM.ClientChunks))
+    print("[NKM] Collision chunks resident: " .. loadedCollisionChunks .. "/" .. tostring(#NKM.ClientChunks))
+    print("[NKM] Collision convexes resident: " .. loadedCollisionConvexes)
+    print("[NKM] Triangle surface patches resident: " .. loadedTrianglePatches)
+    print("[NKM] Triangle collision triangles resident: " .. loadedTriangleCount)
+    print("[NKM] Chunk size: " .. tostring(NKM.ClientChunkStats and NKM.ClientChunkStats.chunkSize or NKM.DefaultChunkSize))
+    print("[NKM] Pending requests: " .. tostring((function()
+        local count = 0
+        for _, chunk in ipairs(NKM.ClientChunks or {}) do
+            if chunk.requestPending then count = count + 1 end
+        end
+        return count
+    end)()))
+    print("[NKM] Waiting chunks: " .. tostring(NKM.LastChunkRequestQueueSize or 0))
+    local cacheFiles, cacheBytes = NKM.GetChunkCacheDiskStats()
+    local cacheStats = NKM.ChunkCacheStats or {}
+    print(string.format("[NKM] Chunk cache: %d files, %d bytes, hits=%d misses=%d writes=%d corruptions=%d evictions=%d",
+        cacheFiles, cacheBytes, cacheStats.Hits or 0, cacheStats.Misses or 0,
+        cacheStats.Writes or 0, cacheStats.Corruptions or 0, cacheStats.Evictions or 0))
+
+    local traceStats = NKM.GetTraceStats()
+    if traceStats then
+        print(string.format("[NKM] Client trace: chunks=%d convexes=%d triangles=%d planes=%d",
+            traceStats.ChunkCount, traceStats.ConvexCount, traceStats.TriangleCount or 0, traceStats.PlaneCount))
+        print(string.format("[NKM] Trace BVH: nodes=%d leaves=%d depth=%d leafSize=%d",
+            traceStats.BVHNodeCount, traceStats.BVHLeafCount, traceStats.BVHDepth, traceStats.BVHLeafSize))
+        print(string.format("[NKM] Last trace chunks: %d/%d, candidates: %d/%d (plane tests: %d)",
+            traceStats.LastChunkCount, traceStats.ChunkCount,
+            traceStats.LastCandidateCount, traceStats.ConvexCount + (traceStats.TriangleCount or 0), traceStats.LastTestedCount))
+    else
+        print("[NKM] Client trace: no streamed collision chunks")
+    end
+end)
+
+concommand.Add("nkm_client_chunks", function()
+    print(string.format("[NKM] Client chunks: %d total, %d loaded, %d active render meshes",
+        #NKM.ClientChunks, NKM.LoadedClientChunkCount or 0, #NKM.RenderMeshes))
+    for _, chunk in ipairs(NKM.ClientChunks or {}) do
+        print(string.format(
+            "[NKM] Chunk %s loaded=%s renderMeshes=%d meshGroups=%d convexes=%d/%d trianglePatches=%d/%d pending=%s",
+            chunk.id,
+            tostring(chunk.loaded == true),
+            #(chunk.renderMeshes or {}),
+            chunk.meshGroupCount or 0,
+            chunk.collision and #chunk.collision or 0,
+            chunk.collisionCount or 0,
+            chunk.triangleSurfaces and #chunk.triangleSurfaces or 0,
+            chunk.triangleSurfaceCount or 0,
+            tostring(chunk.requestPending == true)
+        ))
+    end
+end)
+
+concommand.Add("nkm_cache_status", function()
+    local cacheFiles, cacheBytes = NKM.GetChunkCacheDiskStats()
+    local stats = NKM.ChunkCacheStats or {}
+    print("[NKM] Cache root: data/" .. NKM.ChunkCacheRoot)
+    print("[NKM] Cache map: " .. tostring(NKM.ClientMapName or "none"))
+    print(string.format("[NKM] Cached chunks: %d files, %d bytes", cacheFiles, cacheBytes))
+    print(string.format("[NKM] Session: hits=%d misses=%d writes=%d corruptions=%d evictions=%d",
+        stats.Hits or 0, stats.Misses or 0, stats.Writes or 0,
+        stats.Corruptions or 0, stats.Evictions or 0))
+    print("[NKM] Last cache source: " .. tostring(NKM.LastChunkCacheSource or "none")
+        .. " (" .. tostring(NKM.LastChunkCacheChunk or "no chunk") .. ")")
+end)
+
+concommand.Add("nkm_cache_clear", function(_, _, args)
+    local mapName = args and args[1] or nil
+    if mapName == "" then mapName = nil end
+    if mapName and not NKM.IsValidMapName(mapName) then
+        print("[NKM] Invalid map name. Use: nkm_cache_clear [mapName]")
+        return
+    end
+
+    local deleted = NKM.ClearChunkCache(mapName)
+    print(string.format("[NKM] Deleted %d cached chunk files", deleted))
+end)
+
+concommand.Add("nkm_client_perf", function()
+    NKM.PerfPrint("NKM Client")
+    local cacheStats = NKM.ChunkCacheStats or {}
+    print(string.format("[NKM Client] Cache: hits=%d misses=%d writes=%d corruptions=%d diskHits=%d",
+        cacheStats.Hits or 0, cacheStats.Misses or 0, cacheStats.Writes or 0,
+        cacheStats.Corruptions or 0, (NKM.PerfStats.cache_disk_hits and NKM.PerfStats.cache_disk_hits.value) or 0))
+    print(string.format("[NKM Client] Residency: chunks=%d meshes=%d pending=%d",
+        NKM.LoadedClientChunkCount or 0, #NKM.RenderMeshes, (function()
+            local count = 0
+            for _, chunk in ipairs(NKM.ClientChunks or {}) do
+                if chunk.requestPending then count = count + 1 end
+            end
+            return count
+        end)()))
+end)
+
+concommand.Add("nkm_client_perf_reset", function()
+    NKM.PerfReset()
+    print("[NKM Client] Performance counters reset")
+end)
+
+concommand.Add("nkm_client_trace_test", function()
+    if not NKM.TraceMap or (#NKM.TraceMap.convexes == 0 and #NKM.TraceMap.triangles == 0) then
+        print("[NKM] No streamed NKM collision near the client")
+        return
+    end
+
+    local bounds = NKM.TraceMap
+    local centerX = (bounds.mins.x + bounds.maxs.x) * 0.5
+    local centerY = (bounds.mins.y + bounds.maxs.y) * 0.5
+    local centerZ = (bounds.mins.z + bounds.maxs.z) * 0.5
+    local startPos, endPos
+    if #NKM.TraceMap.triangles > 0 then
+        startPos = Vector(centerX, centerY, bounds.maxs.z + 256)
+        endPos = Vector(centerX, centerY, bounds.mins.z - 256)
+    else
+        startPos = Vector(centerX, centerY, centerZ)
+        endPos = startPos + Vector((bounds.maxs.x - bounds.mins.x) + 128, 0, 0)
+    end
+    local trace = NKM.TraceLine({ start = startPos, endpos = endPos, nkmOnly = true })
+
+    local stats = NKM.GetTraceStats() or {}
+    print(string.format(
+        "[NKM] Client trace test: Hit=%s HitNKM=%s Fraction=%.4f Surface=%s Convex=%s Triangle=%s Chunks=%d/%d BVH=%d/%d tested=%d",
+        tostring(trace.Hit), tostring(trace.HitNKM), trace.Fraction or 1,
+        tostring(trace.SurfaceProp), tostring(trace.NKM and trace.NKM.ConvexIndex or "none"),
+        tostring(trace.NKM and trace.NKM.TriangleIndex or "none"),
+        stats.LastChunkCount or 0, stats.ChunkCount or 0,
+        stats.LastCandidateCount or 0, (stats.ConvexCount or 0) + (stats.TriangleCount or 0), stats.LastTestedCount or 0
+    ))
+end)
