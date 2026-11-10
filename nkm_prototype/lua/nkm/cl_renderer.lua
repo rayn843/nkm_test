@@ -79,6 +79,14 @@ local NKM_GShaderPixelLightingConVar = CreateClientConVar(
     "nkm_gshader_pixel_lighting", "0", true, false,
     "Use the rebuilt NKM GShader shader for per-pixel ambient/directional/static-point lighting."
 )
+local NKM_GShaderContactShadowsConVar = CreateClientConVar(
+    "nkm_gshader_contact_shadows", "1", true, false,
+    "Enable NKM screen-space point/directional contact shadows."
+)
+local NKM_GShaderAOConVar = CreateClientConVar(
+    "nkm_gshader_ao", "1", true, false,
+    "Enable NKM screen-space ambient occlusion."
+)
 
 local GSHADER_NKM_STENCIL_BIT = 128
 local GSHADER_MAX_DYNAMIC_LIGHTS = 32
@@ -2086,8 +2094,8 @@ local function drawNKMSceneLighting(viewSetup)
             error("NKM reconstructed buffers are not ready for this frame")
         end
 
-        // Refresh the scene copy before binding s3. screenspace_general only
-        // exposes BASETEXTURE and TEXTURE1..TEXTURE3 (samplers s0..s3).
+        -- Refresh the scene copy before binding s3. screenspace_general only
+        -- exposes BASETEXTURE and TEXTURE1..TEXTURE3 (samplers s0..s3).
         render.UpdateScreenEffectTexture()
         local sceneTexture = render.GetScreenEffectTexture()
         if not sceneTexture then error("GMod screen-effect texture is unavailable") end
@@ -2100,9 +2108,12 @@ local function drawNKMSceneLighting(viewSetup)
             { material.SetMatrix, "$viewprojmat", viewProjection },
             { material.SetFloat, "$c0_x", #pointLights },
             { material.SetFloat, "$c0_y", deferred.aoRadius or 72 },
-            { material.SetFloat, "$c0_z", deferred.ao ~= false and (deferred.aoStrength or 0.35) or 0 },
+            { material.SetFloat, "$c0_z",
+                deferred.ao ~= false and NKM_GShaderAOConVar:GetBool()
+                    and (deferred.aoStrength or 0.35) or 0 },
             { material.SetFloat, "$c0_w",
-                lighting.shadows ~= false and deferred.contactShadows ~= false and 1 or 0 },
+                lighting.shadows ~= false and deferred.contactShadows ~= false
+                    and NKM_GShaderContactShadowsConVar:GetBool() and 1 or 0 },
             { material.SetFloat, "$c1_x", ScrW() },
             { material.SetFloat, "$c1_y", ScrH() },
             { material.SetFloat, "$c2_x", (ambient[1] or 0) / 255 },
@@ -2118,7 +2129,8 @@ local function drawNKMSceneLighting(viewSetup)
             local direction = light and light.direction or { 0, 0, 0 }
             local color = light and light.color or { 0, 0, 0 }
             local intensity = light and (light.intensity or 1) or 0
-            local castsShadows = light and lighting.shadows ~= false and light.shadows ~= false and 1 or 0
+            local castsShadows = light and lighting.shadows ~= false
+                and NKM_GShaderContactShadowsConVar:GetBool() and light.shadows ~= false and 1 or 0
             setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_x", direction[1] or 0 }
             setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_y", direction[2] or 0 }
             setters[#setters + 1] = { material.SetFloat, "$c" .. register .. "_z", direction[3] or 0 }
@@ -2944,6 +2956,9 @@ concommand.Add("nkm_gshader_status", function()
     print("[NKM] GShader bridge enabled: " .. tostring(NKM.GShaderBridgeEnabled == true))
     print("[NKM] Pixel lighting requested/active: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
         .. "/" .. tostring(NKM.GShaderPixelLighting == true))
+    print("[NKM] Screen-space effects: contactShadows="
+        .. tostring(NKM_GShaderContactShadowsConVar:GetBool())
+        .. "; AO=" .. tostring(NKM_GShaderAOConVar:GetBool()))
     print("[NKM] Full-scene deferred passes: " .. tostring(NKM.GShaderScenePassCount or 0))
     print("[NKM] NKM GBuffer builds: " .. tostring(NKM.GShaderNKMBufferBuildCount or 0)
         .. "; ready=" .. tostring(NKM.GShaderNKMBufferReady == true)
