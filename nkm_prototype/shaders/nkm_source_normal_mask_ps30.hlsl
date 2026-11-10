@@ -6,6 +6,7 @@
 sampler SourceWorldPosBuffer : register(s0); // GShader _rt_WPDepth
 sampler NKMWorldPosBuffer    : register(s1); // NKM _rt_NKM_WPDepth
 sampler SourceNormalBuffer   : register(s2); // GShader _rt_NormalsTangents
+sampler SourceModelNormalBuffer : register(s3); // Interpolated, skinned Source entity vertex normals
 
 const float4 SmoothingParams : register(c0); // x=strength, y=relative depth tolerance, z=min normal dot, w=center weight
 float2 TexelSize : register(c4);
@@ -144,8 +145,17 @@ float4 main(PS_INPUT input) : COLOR0
     bool sourceIsVisibleReceiver = sourceHasGeometry && nkmHasGeometry
         && sourcePositionDepth.a > nkmPositionDepth.a + depthBias;
 
-    float3 centerNormal = DecodeSourceNormal(sourceNormal.rg);
-    float3 smoothedNormal = SmoothSourceNormal(uv, sourcePositionDepth, centerNormal);
+    float4 modelNormalSample = tex2Dlod(SourceModelNormalBuffer, float4(uv, 0, 0));
+    bool hasInterpolatedModelNormal = modelNormalSample.b > 0.5;
+    float3 centerNormal = hasInterpolatedModelNormal
+        ? DecodeSourceNormal(modelNormalSample.rg)
+        : DecodeSourceNormal(sourceNormal.rg);
+    // Original vertex normals are already interpolated across the model surface.
+    // Do not blur them again; retain the edge-aware screen-space filter only as
+    // a fallback for BSP/static props and other geometry not captured as entities.
+    float3 smoothedNormal = hasInterpolatedModelNormal
+        ? centerNormal
+        : SmoothSourceNormal(uv, sourcePositionDepth, centerNormal);
 
     // RG remains octahedrally encoded; B remains the receiver-visibility mask.
     return float4(EncodeSourceNormal(smoothedNormal),

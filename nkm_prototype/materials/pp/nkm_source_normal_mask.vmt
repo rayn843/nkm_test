@@ -5,6 +5,7 @@
     "$basetexture" "_rt_WPDepth"
     "$texture1" "_rt_NKM_WPDepth"
     "$texture2" "_rt_NormalsTangents"
+    "$texture3" "color/black"
 
     "<dx90>"
     {
