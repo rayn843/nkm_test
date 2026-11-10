@@ -1001,6 +1001,9 @@ local NKM_GShaderRawDepthRT
 local NKM_GShaderWorldPosRT
 local NKM_GShaderNormalRT
 local NKM_GShaderDecodedNormalRT
+local NKM_GShaderVertexNormalRT
+local NKM_GShaderDecodedVertexNormalRT
+local NKM_GShaderVertexNormalDecodeMaterial
 local NKM_GShaderNormal4TapRT
 local NKM_GShaderDecodedNormal4TapRT
 local NKM_GShaderWorldPosMaterial
@@ -1022,6 +1025,59 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     if isfunction(shaderlib.GetWorldNormalsImageFormat) then
         local formatOK, format = pcall(shaderlib.GetWorldNormalsImageFormat)
         if formatOK and format then normalFormat = format end
+    end
+
+    local vertexNormalReady = NKM_GShaderVertexNormalRT
+        and NKM_GShaderVertexNormalRT:Width() == width
+        and NKM_GShaderVertexNormalRT:Height() == height
+    if not vertexNormalReady then
+        local targetOK, target = pcall(GetRenderTargetEx,
+            "_rt_NKM_VertexNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_SEPARATE, flags, 0, normalFormat)
+        NKM_GShaderVertexNormalRT = targetOK and target or nil
+        if not NKM_GShaderVertexNormalRT then
+            NKM.GShaderNKMBufferDebugVertexError = tostring(target or "vertex normal RT creation failed")
+        end
+    end
+
+    local decodedVertexReady = NKM_GShaderDecodedVertexNormalRT
+        and NKM_GShaderDecodedVertexNormalRT:Width() == width
+        and NKM_GShaderDecodedVertexNormalRT:Height() == height
+    if not decodedVertexReady then
+        local targetOK, target = pcall(GetRenderTargetEx,
+            "_rt_NKM_DecodedVertexNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
+        NKM_GShaderDecodedVertexNormalRT = targetOK and target or nil
+        if not NKM_GShaderDecodedVertexNormalRT then
+            NKM.GShaderNKMBufferDebugVertexError = tostring(target or "decoded vertex normal RT creation failed")
+        end
+    end
+
+    if not NKM_GShaderVertexNormalDecodeMaterial then
+        local materialOK, material = pcall(CreateMaterial, "nkm_gshader_vertex_normal_decode_debug",
+            "screenspace_general", {
+                ["$pixshader"] = "wn_tangetns_decode_ps30",
+                ["$vertexshader"] = "pp_vs30",
+                ["$basetexture"] = "_rt_NKM_VertexNormals",
+                ["$no_fullbright"] = "1",
+                ["$ignorez"] = "1",
+                ["$VERTEXTRANSFORM"] = "1",
+                ["$WRITEALPHA"] = "1",
+                ["$copyalpha"] = "1",
+                ["$vertexalpha"] = "1"
+            })
+        if not materialOK or not material then
+            NKM_GShaderVertexNormalDecodeMaterial = nil
+            NKM.GShaderNKMBufferDebugVertexError = tostring(material or "vertex normal decode material failed")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderVertexNormalDecodeMaterial = nil
+                NKM.GShaderNKMBufferDebugVertexError = "GShader vertex normal decode shader is unavailable"
+            else
+                NKM_GShaderVertexNormalDecodeMaterial = material
+            end
+        end
     end
 
     local decodedReady = NKM_GShaderDecodedNormalRT
@@ -1151,6 +1207,15 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
                 NKM_GShaderNormal4TapDecodeMaterial = material
             end
         end
+    end
+
+    local vertexNormalDebugReady = NKM_GShaderVertexNormalRT ~= nil
+        and NKM_GShaderDecodedVertexNormalRT ~= nil
+        and NKM_GShaderVertexNormalDecodeMaterial ~= nil
+    if vertexNormalDebugReady then
+        NKM.GShaderNKMBufferDebugVertexError = nil
+    elseif not NKM.GShaderNKMBufferDebugVertexError then
+        NKM.GShaderNKMBufferDebugVertexError = "vertex normal debug resources are incomplete"
     end
 
     local fourTapReady = NKM_GShaderNormal4TapRT ~= nil
@@ -1360,6 +1425,80 @@ local function drawNKMReconstruction(material, target, worldProjection, eyePosit
     return true
 end
 
+local function drawNKMVertexNormalBuffer(viewSetup)
+    if not NKM_GShaderVertexNormalRT then
+        return false, "vertex normal RT is unavailable", 0
+    end
+
+    local pushedTarget = false
+    local cameraStarted = false
+    local drawnMeshes = 0
+    local width, height = ScrW(), ScrH()
+    local ok, err = pcall(function()
+        render.PushRenderTarget(NKM_GShaderVertexNormalRT)
+        pushedTarget = true
+        render.Clear(128, 128, 255, 0, true, true)
+
+        cam.Start3D(viewSetup.origin, viewSetup.angles, viewSetup.fov,
+            0, 0, width, height, viewSetup.znear or 1, viewSetup.zfar or 32768)
+        cameraStarted = true
+        render.CullMode(NKM.CullModeSetting == 1 and MATERIAL_CULLMODE_CW or MATERIAL_CULLMODE_CCW)
+        render.OverrideDepthEnable(true, true)
+        render.SetBlend(1)
+        render.SetColorModulation(1, 1, 1)
+        render.SetMaterial(GSHADER_NKM_VERTEX_NORMAL_MATERIAL)
+
+        for _, entry in ipairs(NKM.RenderMeshes or {}) do
+            if entry.normalDebugMesh and entry.normalDebugMesh:IsValid() then
+                entry.normalDebugMesh:Draw()
+                drawnMeshes = drawnMeshes + 1
+            end
+        end
+
+        render.OverrideDepthEnable(false, false)
+        render.CullMode(MATERIAL_CULLMODE_CCW)
+        cam.End3D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End3D) end
+    render.OverrideDepthEnable(false, false)
+    render.CullMode(MATERIAL_CULLMODE_CCW)
+    render.SetColorModulation(1, 1, 1)
+    render.SetBlend(1)
+    if pushedTarget then pcall(render.PopRenderTarget) end
+
+    if not ok then return false, tostring(err), drawnMeshes end
+    return true, nil, drawnMeshes
+end
+
+local function drawNKMDecodedVertexNormals()
+    if not NKM_GShaderVertexNormalDecodeMaterial or not NKM_GShaderDecodedVertexNormalRT
+        or not NKM_GShaderVertexNormalRT then
+        return false, "vertex normal decode resources are unavailable"
+    end
+
+    local pushedTarget = false
+    local cameraStarted = false
+    local ok, err = pcall(function()
+        NKM_GShaderVertexNormalDecodeMaterial:SetTexture("$basetexture", NKM_GShaderVertexNormalRT)
+        render.PushRenderTarget(NKM_GShaderDecodedVertexNormalRT)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(NKM_GShaderVertexNormalDecodeMaterial)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
+end
+
 local function drawNKMDecodedNormalDebug()
     if not NKM_GShaderNormalDecodeMaterial or not NKM_GShaderDecodedNormalRT or not NKM_GShaderNormalRT then
         return false, "normal decode debug resources are unavailable"
@@ -1396,6 +1535,17 @@ local function buildNKMReconstructionBuffers(viewSetup)
     if not rawOK then
         NKM.GShaderNKMBufferLastError = "NKM-only depth render failed: " .. tostring(rawError)
         return false
+    end
+
+    if NKM.GShaderNKMBufferDebug then
+        local vertexOK, vertexError, vertexMeshes = drawNKMVertexNormalBuffer(viewSetup)
+        NKM.GShaderNKMBufferDebugVertexMeshes = vertexMeshes or 0
+        if not vertexOK then
+            NKM.GShaderNKMBufferDebugVertexError = tostring(vertexError)
+        else
+            local decodeOK, decodeError = drawNKMDecodedVertexNormals()
+            NKM.GShaderNKMBufferDebugVertexError = decodeOK and nil or tostring(decodeError)
+        end
     end
 
     local projectionOK, worldProjection = pcall(getNKMReconstructionViewProjection, viewSetup)
@@ -1480,7 +1630,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if not NKM.GShaderNKMBufferDebug then return end
     if not NKM_GShaderRawDepthRT or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then return end
 
-    local width = math.floor((ScrW() - 48) / 5)
+    local width = math.floor((ScrW() - 60) / 6)
     local height = math.floor(width * ScrH() / math.max(ScrW(), 1))
     local y = ScrH() - height - 34
     local gap = 8
@@ -1493,11 +1643,15 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     render.DrawTextureToScreenRect(NKM_GShaderNormalRT, x3, y, width, height)
     local x4 = x3 + width + gap
     local x5 = x4 + width + gap
+    local x6 = x5 + width + gap
     if NKM_GShaderDecodedNormalRT then
         render.DrawTextureToScreenRect(NKM_GShaderDecodedNormalRT, x4, y, width, height)
     end
     if NKM_GShaderDecodedNormal4TapRT then
         render.DrawTextureToScreenRect(NKM_GShaderDecodedNormal4TapRT, x5, y, width, height)
+    end
+    if NKM_GShaderDecodedVertexNormalRT then
+        render.DrawTextureToScreenRect(NKM_GShaderDecodedVertexNormalRT, x6, y, width, height)
     end
     draw.SimpleText("NKM raw depth", "DermaDefault", x1, y + height + 4, color_white)
     draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
@@ -1508,6 +1662,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM_GShaderDecodedNormal4TapRT then
         draw.SimpleText("Normals 4-tap", "DermaDefault", x5, y + height + 4, color_white)
     end
+    if NKM_GShaderDecodedVertexNormalRT then
+        draw.SimpleText("Normals from mesh", "DermaDefault", x6, y + height + 4, color_white)
+    end
     if NKM.GShaderNKMBufferDebugLastError then
         draw.SimpleText("Improved decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
             "DermaDefault", 8, y - 36, Color(255, 100, 100))
@@ -1515,6 +1672,10 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM.GShaderNKMBufferDebug4TapError then
         draw.SimpleText("4-tap debug: " .. tostring(NKM.GShaderNKMBufferDebug4TapError),
             "DermaDefault", 8, y - 18, Color(255, 100, 100))
+    end
+    if NKM.GShaderNKMBufferDebugVertexError then
+        draw.SimpleText("Mesh normal debug: " .. tostring(NKM.GShaderNKMBufferDebugVertexError),
+            "DermaDefault", 8, y - 54, Color(255, 100, 100))
     end
 end)
 
@@ -2372,12 +2533,17 @@ concommand.Add("nkm_gshader_status", function()
     end
     if NKM.GShaderNKMBufferDebug then
         print("[NKM] NKM normal debug: improved decoded=" .. tostring(NKM_GShaderDecodedNormalRT ~= nil)
+            .. "; mesh normal meshes=" .. tostring(NKM.GShaderNKMBufferDebugVertexMeshes or 0)
+            .. "; mesh normal decoded=" .. tostring(NKM_GShaderDecodedVertexNormalRT ~= nil)
             .. "; 4tap target=" .. tostring(NKM_GShaderNormal4TapRT ~= nil)
             .. "; 4tap decoded=" .. tostring(NKM_GShaderDecodedNormal4TapRT ~= nil)
             .. "; 4tap shader=" .. tostring(NKM_GShaderNormal4TapMaterial ~= nil)
             .. "; 4tap decode=" .. tostring(NKM_GShaderNormal4TapDecodeMaterial ~= nil))
         if NKM.GShaderNKMBufferDebug4TapError then
             print("[NKM] NKM 4-tap debug error: " .. tostring(NKM.GShaderNKMBufferDebug4TapError))
+        end
+        if NKM.GShaderNKMBufferDebugVertexError then
+            print("[NKM] NKM mesh normal debug error: " .. tostring(NKM.GShaderNKMBufferDebugVertexError))
         end
     end
     print("[NKM] Engine SSAO depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
@@ -2399,6 +2565,7 @@ end)
 
 concommand.Add("nkm_gshader_debug_buffers", function(_, _, args)
     local value = args and args[1]
+    local previous = NKM.GShaderNKMBufferDebug == true
     if value == "1" then
         NKM.GShaderNKMBufferDebug = true
     elseif value == "0" then
@@ -2407,6 +2574,14 @@ concommand.Add("nkm_gshader_debug_buffers", function(_, _, args)
         print("[NKM] Usage: nkm_gshader_debug_buffers [0|1]")
         return
     end
+
+    if previous ~= (NKM.GShaderNKMBufferDebug == true)
+        and isfunction(NKM.RebuildBSPDisplacementRenderMeshes) then
+        local rebuilt, failed = NKM.RebuildBSPDisplacementRenderMeshes()
+        print(string.format("[NKM] Rebuilt render meshes for normal diagnostics: %d succeeded, %d failed",
+            rebuilt or 0, failed or 0))
+    end
+
     print("[NKM] NKM GBuffer debug: " .. tostring(NKM.GShaderNKMBufferDebug == true))
 end)
 
