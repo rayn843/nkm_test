@@ -47,38 +47,55 @@ float3 SmoothSourceNormal(float2 uv, float4 centerDepth, float3 centerNormal)
     if (strength <= 0.001 || centerDepth.a <= SOURCE_SKY_DEPTH)
         return centerNormal;
 
-    // Eight immediate neighbours soften small faceting; four wider taps spread
-    // the smoothing across larger low-poly triangles without a large blur radius.
-    static const float2 offsets[12] = {
+    // Three rings reach farther across low-poly triangle faces. The wider
+    // taps make the result visibly smoother than a 1-3 px cleanup filter.
+    static const float2 offsets[24] = {
+        // Ring 1 px
         float2(-1.0, -1.0), float2( 0.0, -1.0), float2( 1.0, -1.0),
         float2(-1.0,  0.0),                       float2( 1.0,  0.0),
         float2(-1.0,  1.0), float2( 0.0,  1.0), float2( 1.0,  1.0),
-        float2(-3.0,  0.0), float2( 3.0,  0.0),
-        float2( 0.0, -3.0), float2( 0.0,  3.0)
+        // Ring 3 px
+        float2(-3.0, -3.0), float2( 0.0, -3.0), float2( 3.0, -3.0),
+        float2(-3.0,  0.0),                       float2( 3.0,  0.0),
+        float2(-3.0,  3.0), float2( 0.0,  3.0), float2( 3.0,  3.0),
+        // Ring 7 px
+        float2(-7.0, -7.0), float2( 0.0, -7.0), float2( 7.0, -7.0),
+        float2(-7.0,  0.0),                       float2( 7.0,  0.0),
+        float2(-7.0,  7.0), float2( 0.0,  7.0), float2( 7.0,  7.0)
     };
-    static const float spatialWeights[12] = {
-        0.70, 1.00, 0.70,
+    static const float spatialWeights[24] = {
+        1.00, 1.00, 1.00,
         1.00,        1.00,
-        0.70, 1.00, 0.70,
-        0.45, 0.45, 0.45, 0.45
+        1.00, 1.00, 1.00,
+        0.75, 0.75, 0.75,
+        0.75,        0.75,
+        0.75, 0.75, 0.75,
+        0.45, 0.45, 0.45,
+        0.45,        0.45,
+        0.45, 0.45, 0.45
     };
 
-    float depthTolerance = max(SmoothingParams.y, 0.001);
     float minimumNormalDot = saturate(SmoothingParams.z);
     float normalRange = max(1.0 - minimumNormalDot, 0.001);
-    float centerWeight = max(SmoothingParams.w, 0.1);
+    float centerWeight = max(SmoothingParams.w, 0.05);
 
     float3 normalSum = centerNormal * centerWeight;
     float totalWeight = centerWeight;
 
     [unroll]
-    for (int sampleIndex = 0; sampleIndex < 12; ++sampleIndex)
+    for (int sampleIndex = 0; sampleIndex < 24; ++sampleIndex)
     {
-        float2 sampleUV = saturate(uv + offsets[sampleIndex] * TexelSize);
+        float2 offset = offsets[sampleIndex];
+        float2 sampleUV = saturate(uv + offset * TexelSize);
         float4 sampleDepth = tex2Dlod(SourceWorldPosBuffer, float4(sampleUV, 0, 0));
         if (sampleDepth.a <= SOURCE_SKY_DEPTH)
             continue;
 
+        // Depth tolerance grows with sample radius. This allows depth to change
+        // gradually across a sloped mesh without allowing distant background
+        // surfaces to bleed through silhouettes.
+        float sampleRadius = max(abs(offset.x), abs(offset.y));
+        float depthTolerance = max(SmoothingParams.y, 0.001) * sampleRadius;
         float relativeDepthDelta = abs(sampleDepth.a - centerDepth.a)
             / max(centerDepth.a, SOURCE_SKY_DEPTH);
         float depthWeight = saturate(1.0 - relativeDepthDelta / depthTolerance);
