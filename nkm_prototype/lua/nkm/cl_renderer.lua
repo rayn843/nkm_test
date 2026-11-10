@@ -3315,6 +3315,19 @@ concommand.Add("nkm_gshader_status", function()
         .. "; last mask meshes=" .. tostring(NKM.GShaderLastMaskDraws or 0))
     print("[NKM] Deferred shader material: " .. tostring(material ~= nil))
     print("[NKM] LUT uploaded: " .. tostring(NKM.GShaderLUTGeneration == NKM.ClientGeneration))
+    local sourceModelNormalShaderReady = false
+    if NKM_GShaderSourceModelNormalMaterial then
+        local shaderOK, isError = pcall(
+            NKM_GShaderSourceModelNormalMaterial.IsError,
+            NKM_GShaderSourceModelNormalMaterial)
+        sourceModelNormalShaderReady = shaderOK and not isError
+    end
+    print("[NKM] Source model normals: enabled=" .. tostring(NKM_GShaderSourceModelNormalsConVar:GetBool())
+        .. "; shaderCompiled=" .. tostring(sourceModelNormalShaderReady)
+        .. "; passReady=" .. tostring(NKM.GShaderSourceModelNormalPassReady == true)
+        .. "; entitiesDrawn=" .. tostring(NKM.GShaderSourceModelNormalDraws or 0)
+        .. (NKM.GShaderSourceModelNormalLastError
+            and ("; error=" .. tostring(NKM.GShaderSourceModelNormalLastError)) or ""))
     if NKM.GShaderLUTLastError then print("[NKM] LUT error: " .. tostring(NKM.GShaderLUTLastError)) end
     if NKM.GShaderLastError then print("[NKM] Last error: " .. tostring(NKM.GShaderLastError)) end
 end)
