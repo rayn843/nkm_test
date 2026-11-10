@@ -1,5 +1,4 @@
 sampler WorldPosInverseBuffer : register(s2);
-float2 TexBaseSize : register(c4);
 
 struct PS_INPUT {
     float2 P : VPOS;
@@ -7,10 +6,13 @@ struct PS_INPUT {
 };
 
 float4 main(PS_INPUT frag) : COLOR0 {
-    float2 uv = (frag.P + 0.5) * TexBaseSize;
+    // Use interpolated screen-quad UVs rather than VPOS. This makes the
+    // diagnostic independent of pixel-position origin/viewport conventions.
+    float2 uv = saturate(frag.uv);
     float4 inverseWorldPosition = tex2Dlod(WorldPosInverseBuffer, float4(uv, 0, 0));
 
-    // Match the world-position diagnostic's sky rejection and color transform.
+    // GShader stores reciprocal world position in RGB and reciprocal linear
+    // depth in A. Match the world-position diagnostic's sky rejection.
     if (inverseWorldPosition.a <= 0.000251) {
         discard;
     }
