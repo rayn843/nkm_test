@@ -1005,6 +1005,8 @@ local NKM_GShaderDecodedWorldPosRT
 local NKM_GShaderWorldPosDebugMaterial
 local NKM_GShaderWorldPosSampler2RT
 local NKM_GShaderWorldPosSampler2Material
+local NKM_GShaderWorldPosNormal4TapRT
+local NKM_GShaderWorldPosNormal4TapMaterial
 local NKM_GShaderDecodedNormalRT
 local NKM_GShaderVertexNormalRT
 local NKM_GShaderDecodedVertexNormalRT
@@ -1057,6 +1059,39 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
         if not NKM_GShaderWorldPosSampler2RT then
             NKM.GShaderNKMBufferDebugSampler2Error =
                 tostring(target or "sampler2 debug RT creation failed")
+        end
+    end
+
+    local normal4TapTargetReady = NKM_GShaderWorldPosNormal4TapRT
+        and NKM_GShaderWorldPosNormal4TapRT:Width() == width
+        and NKM_GShaderWorldPosNormal4TapRT:Height() == height
+    if not normal4TapTargetReady then
+        local targetOK, target = pcall(GetRenderTargetEx,
+            "_rt_NKM_WP_Normal4Tap_Debug", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA8888)
+        NKM_GShaderWorldPosNormal4TapRT = targetOK and target or nil
+        if not NKM_GShaderWorldPosNormal4TapRT then
+            NKM.GShaderNKMBufferDebugNormal4TapError =
+                tostring(target or "4-tap world-normal debug RT creation failed")
+        end
+    end
+
+    if not NKM_GShaderWorldPosNormal4TapMaterial then
+        local materialOK, material = pcall(Material, "pp/nkm_wp_4tap_normal_debug")
+        if not materialOK or not material then
+            NKM_GShaderWorldPosNormal4TapMaterial = nil
+            NKM.GShaderNKMBufferDebugNormal4TapError =
+                tostring(material or "4-tap world-normal debug material is unavailable")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderWorldPosNormal4TapMaterial = nil
+                NKM.GShaderNKMBufferDebugNormal4TapError =
+                    "nkm_wp_4tap_normal_debug_ps30 is not compiled/available"
+            else
+                NKM_GShaderWorldPosNormal4TapMaterial = material
+                NKM.GShaderNKMBufferDebugNormal4TapError = nil
+            end
         end
     end
 
@@ -1292,6 +1327,13 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     elseif not NKM.GShaderNKMBufferDebugSampler2Error then
         NKM.GShaderNKMBufferDebugSampler2Error =
             "world-position sampler2 debug resources are incomplete"
+    end
+
+    if NKM_GShaderWorldPosNormal4TapRT and NKM_GShaderWorldPosNormal4TapMaterial then
+        NKM.GShaderNKMBufferDebugNormal4TapError = nil
+    elseif not NKM.GShaderNKMBufferDebugNormal4TapError then
+        NKM.GShaderNKMBufferDebugNormal4TapError =
+            "4-tap world-normal debug resources are incomplete"
     end
 
     local vertexNormalDebugReady = NKM_GShaderVertexNormalRT ~= nil
@@ -1658,6 +1700,34 @@ local function drawNKMWorldPosSampler2Debug()
     return true
 end
 
+local function drawNKMWorldPosNormal4TapDebug()
+    if not NKM_GShaderWorldPosNormal4TapMaterial or not NKM_GShaderWorldPosNormal4TapRT
+        or not NKM_GShaderWorldPosRT then
+        return false, "4-tap world-normal debug resources are unavailable"
+    end
+
+    local pushedTarget = false
+    local cameraStarted = false
+    local ok, err = pcall(function()
+        setNKMShaderTexelSize(NKM_GShaderWorldPosNormal4TapMaterial, NKM_GShaderWorldPosRT)
+        NKM_GShaderWorldPosNormal4TapMaterial:SetTexture("$texture2", NKM_GShaderWorldPosRT)
+        render.PushRenderTarget(NKM_GShaderWorldPosNormal4TapRT)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(NKM_GShaderWorldPosNormal4TapMaterial)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
+end
+
 local function drawNKMDecodedNormalDebug()
     if not NKM_GShaderNormalDecodeMaterial or not NKM_GShaderDecodedNormalRT or not NKM_GShaderNormalRT then
         return false, "normal decode debug resources are unavailable"
@@ -1737,6 +1807,13 @@ local function buildNKMReconstructionBuffers(viewSetup)
         else
             NKM.GShaderNKMBufferDebugSampler2Error = tostring(sampler2Error)
         end
+
+        local worldNormalOK, worldNormalError = drawNKMWorldPosNormal4TapDebug()
+        if worldNormalOK then
+            NKM.GShaderNKMBufferDebugNormal4TapError = nil
+        else
+            NKM.GShaderNKMBufferDebugNormal4TapError = tostring(worldNormalError)
+        end
     end
 
     local frameBuffer = render.GetScreenEffectTexture()
@@ -1807,7 +1884,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if not NKM.GShaderNKMBufferDebug then return end
     if not NKM_GShaderRawDepthRT or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then return end
 
-    local width = math.floor((ScrW() - 80) / 8)
+    local width = math.floor((ScrW() - 88) / 9)
     local height = math.floor(width * ScrH() / math.max(ScrW(), 1))
     local y = ScrH() - height - 34
     local gap = 8
@@ -1823,6 +1900,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     local x6 = x5 + width + gap
     local x7 = x6 + width + gap
     local x8 = x7 + width + gap
+    local x9 = x8 + width + gap
     if NKM_GShaderDecodedNormalRT then
         render.DrawTextureToScreenRect(NKM_GShaderDecodedNormalRT, x4, y, width, height)
     end
@@ -1837,6 +1915,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     end
     if NKM_GShaderWorldPosSampler2RT then
         render.DrawTextureToScreenRect(NKM_GShaderWorldPosSampler2RT, x8, y, width, height)
+    end
+    if NKM_GShaderWorldPosNormal4TapRT then
+        render.DrawTextureToScreenRect(NKM_GShaderWorldPosNormal4TapRT, x9, y, width, height)
     end
     draw.SimpleText("NKM raw depth", "DermaDefault", x1, y + height + 4, color_white)
     draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
@@ -1855,6 +1936,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     end
     if NKM_GShaderWorldPosSampler2RT then
         draw.SimpleText("NKM WP sampler s2", "DermaDefault", x8, y + height + 4, color_white)
+    end
+    if NKM_GShaderWorldPosNormal4TapRT then
+        draw.SimpleText("NKM WP 4-tap normal XYZ", "DermaDefault", x9, y + height + 4, color_white)
     end
     if NKM.GShaderNKMBufferDebugLastError then
         draw.SimpleText("Improved decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
@@ -1875,6 +1959,10 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM.GShaderNKMBufferDebugSampler2Error then
         draw.SimpleText("WP sampler2 debug: " .. tostring(NKM.GShaderNKMBufferDebugSampler2Error),
             "DermaDefault", 8, y - 90, Color(255, 100, 100))
+    end
+    if NKM.GShaderNKMBufferDebugNormal4TapError then
+        draw.SimpleText("WP 4-tap normal debug: " .. tostring(NKM.GShaderNKMBufferDebugNormal4TapError),
+            "DermaDefault", 8, y - 108, Color(255, 100, 100))
     end
 end)
 
@@ -2735,6 +2823,7 @@ concommand.Add("nkm_gshader_status", function()
             .. "; WP XYZ decoded=" .. tostring(NKM_GShaderDecodedWorldPosRT ~= nil)
             .. "; WP debug shader=" .. tostring(NKM_GShaderWorldPosDebugMaterial ~= nil)
             .. "; WP sampler2 shader=" .. tostring(NKM_GShaderWorldPosSampler2Material ~= nil)
+            .. "; WP 4-tap normal shader=" .. tostring(NKM_GShaderWorldPosNormal4TapMaterial ~= nil)
             .. "; mesh normal meshes=" .. tostring(NKM.GShaderNKMBufferDebugVertexMeshes or 0)
             .. "; mesh normal decoded=" .. tostring(NKM_GShaderDecodedVertexNormalRT ~= nil)
             .. "; 4tap target=" .. tostring(NKM_GShaderNormal4TapRT ~= nil)
@@ -2754,6 +2843,10 @@ concommand.Add("nkm_gshader_status", function()
         if NKM.GShaderNKMBufferDebugSampler2Error then
             print("[NKM] NKM world-position sampler2 debug error: "
                 .. tostring(NKM.GShaderNKMBufferDebugSampler2Error))
+        end
+        if NKM.GShaderNKMBufferDebugNormal4TapError then
+            print("[NKM] NKM 4-tap world-normal debug error: "
+                .. tostring(NKM.GShaderNKMBufferDebugNormal4TapError))
         end
     end
     print("[NKM] Engine SSAO depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
