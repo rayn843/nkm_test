@@ -1001,6 +1001,8 @@ end
 local NKM_GShaderRawDepthRT
 local NKM_GShaderWorldPosRT
 local NKM_GShaderNormalRT
+local NKM_GShaderDecodedWorldPosRT
+local NKM_GShaderWorldPosDebugMaterial
 local NKM_GShaderDecodedNormalRT
 local NKM_GShaderVertexNormalRT
 local NKM_GShaderDecodedVertexNormalRT
@@ -1026,6 +1028,39 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     if isfunction(shaderlib.GetWorldNormalsImageFormat) then
         local formatOK, format = pcall(shaderlib.GetWorldNormalsImageFormat)
         if formatOK and format then normalFormat = format end
+    end
+
+    local decodedWorldPosReady = NKM_GShaderDecodedWorldPosRT
+        and NKM_GShaderDecodedWorldPosRT:Width() == width
+        and NKM_GShaderDecodedWorldPosRT:Height() == height
+    if not decodedWorldPosReady then
+        local targetOK, target = pcall(GetRenderTargetEx,
+            "_rt_NKM_DecodedWorldPosition", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA8888)
+        NKM_GShaderDecodedWorldPosRT = targetOK and target or nil
+        if not NKM_GShaderDecodedWorldPosRT then
+            NKM.GShaderNKMBufferDebugWorldPosError =
+                tostring(target or "decoded world-position RT creation failed")
+        end
+    end
+
+    if not NKM_GShaderWorldPosDebugMaterial then
+        local materialOK, material = pcall(Material, "pp/nkm_wp_position_debug")
+        if not materialOK or not material then
+            NKM_GShaderWorldPosDebugMaterial = nil
+            NKM.GShaderNKMBufferDebugWorldPosError =
+                tostring(material or "world-position debug material is unavailable")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderWorldPosDebugMaterial = nil
+                NKM.GShaderNKMBufferDebugWorldPosError =
+                    "nkm_wp_position_debug_ps30 is not compiled/available"
+            else
+                NKM_GShaderWorldPosDebugMaterial = material
+                NKM.GShaderNKMBufferDebugWorldPosError = nil
+            end
+        end
     end
 
     local vertexNormalReady = NKM_GShaderVertexNormalRT
@@ -1208,6 +1243,13 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
                 NKM_GShaderNormal4TapDecodeMaterial = material
             end
         end
+    end
+
+    if NKM_GShaderDecodedWorldPosRT and NKM_GShaderWorldPosDebugMaterial then
+        NKM.GShaderNKMBufferDebugWorldPosError = nil
+    elseif not NKM.GShaderNKMBufferDebugWorldPosError then
+        NKM.GShaderNKMBufferDebugWorldPosError =
+            "world-position debug resources are incomplete"
     end
 
     local vertexNormalDebugReady = NKM_GShaderVertexNormalRT ~= nil
@@ -1500,6 +1542,33 @@ local function drawNKMDecodedVertexNormals()
     return true
 end
 
+local function drawNKMDecodedWorldPositionDebug()
+    if not NKM_GShaderWorldPosDebugMaterial or not NKM_GShaderDecodedWorldPosRT
+        or not NKM_GShaderWorldPosRT then
+        return false, "decoded world-position debug resources are unavailable"
+    end
+
+    local pushedTarget = false
+    local cameraStarted = false
+    local ok, err = pcall(function()
+        NKM_GShaderWorldPosDebugMaterial:SetTexture("$basetexture", NKM_GShaderWorldPosRT)
+        render.PushRenderTarget(NKM_GShaderDecodedWorldPosRT)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(NKM_GShaderWorldPosDebugMaterial)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
+end
+
 local function drawNKMDecodedNormalDebug()
     if not NKM_GShaderNormalDecodeMaterial or not NKM_GShaderDecodedNormalRT or not NKM_GShaderNormalRT then
         return false, "normal decode debug resources are unavailable"
@@ -1562,6 +1631,15 @@ local function buildNKMReconstructionBuffers(viewSetup)
     if not worldOK then
         NKM.GShaderNKMBufferLastError = "NKM world-position reconstruction failed: " .. tostring(worldError)
         return false
+    end
+
+    if NKM.GShaderNKMBufferDebug then
+        local positionDebugOK, positionDebugError = drawNKMDecodedWorldPositionDebug()
+        if positionDebugOK then
+            NKM.GShaderNKMBufferDebugWorldPosError = nil
+        else
+            NKM.GShaderNKMBufferDebugWorldPosError = tostring(positionDebugError)
+        end
     end
 
     local frameBuffer = render.GetScreenEffectTexture()
@@ -1631,7 +1709,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if not NKM.GShaderNKMBufferDebug then return end
     if not NKM_GShaderRawDepthRT or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then return end
 
-    local width = math.floor((ScrW() - 60) / 6)
+    local width = math.floor((ScrW() - 72) / 7)
     local height = math.floor(width * ScrH() / math.max(ScrW(), 1))
     local y = ScrH() - height - 34
     local gap = 8
@@ -1645,6 +1723,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     local x4 = x3 + width + gap
     local x5 = x4 + width + gap
     local x6 = x5 + width + gap
+    local x7 = x6 + width + gap
     if NKM_GShaderDecodedNormalRT then
         render.DrawTextureToScreenRect(NKM_GShaderDecodedNormalRT, x4, y, width, height)
     end
@@ -1653,6 +1732,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     end
     if NKM_GShaderDecodedVertexNormalRT then
         render.DrawTextureToScreenRect(NKM_GShaderDecodedVertexNormalRT, x6, y, width, height)
+    end
+    if NKM_GShaderDecodedWorldPosRT then
+        render.DrawTextureToScreenRect(NKM_GShaderDecodedWorldPosRT, x7, y, width, height)
     end
     draw.SimpleText("NKM raw depth", "DermaDefault", x1, y + height + 4, color_white)
     draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
@@ -1666,6 +1748,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM_GShaderDecodedVertexNormalRT then
         draw.SimpleText("Normals from mesh", "DermaDefault", x6, y + height + 4, color_white)
     end
+    if NKM_GShaderDecodedWorldPosRT then
+        draw.SimpleText("NKM WP decoded XYZ", "DermaDefault", x7, y + height + 4, color_white)
+    end
     if NKM.GShaderNKMBufferDebugLastError then
         draw.SimpleText("Improved decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
             "DermaDefault", 8, y - 36, Color(255, 100, 100))
@@ -1677,6 +1762,10 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM.GShaderNKMBufferDebugVertexError then
         draw.SimpleText("Mesh normal debug: " .. tostring(NKM.GShaderNKMBufferDebugVertexError),
             "DermaDefault", 8, y - 54, Color(255, 100, 100))
+    end
+    if NKM.GShaderNKMBufferDebugWorldPosError then
+        draw.SimpleText("World-position debug: " .. tostring(NKM.GShaderNKMBufferDebugWorldPosError),
+            "DermaDefault", 8, y - 72, Color(255, 100, 100))
     end
 end)
 
@@ -2534,6 +2623,8 @@ concommand.Add("nkm_gshader_status", function()
     end
     if NKM.GShaderNKMBufferDebug then
         print("[NKM] NKM normal debug: improved decoded=" .. tostring(NKM_GShaderDecodedNormalRT ~= nil)
+            .. "; WP XYZ decoded=" .. tostring(NKM_GShaderDecodedWorldPosRT ~= nil)
+            .. "; WP debug shader=" .. tostring(NKM_GShaderWorldPosDebugMaterial ~= nil)
             .. "; mesh normal meshes=" .. tostring(NKM.GShaderNKMBufferDebugVertexMeshes or 0)
             .. "; mesh normal decoded=" .. tostring(NKM_GShaderDecodedVertexNormalRT ~= nil)
             .. "; 4tap target=" .. tostring(NKM_GShaderNormal4TapRT ~= nil)
@@ -2545,6 +2636,10 @@ concommand.Add("nkm_gshader_status", function()
         end
         if NKM.GShaderNKMBufferDebugVertexError then
             print("[NKM] NKM mesh normal debug error: " .. tostring(NKM.GShaderNKMBufferDebugVertexError))
+        end
+        if NKM.GShaderNKMBufferDebugWorldPosError then
+            print("[NKM] NKM world-position debug error: "
+                .. tostring(NKM.GShaderNKMBufferDebugWorldPosError))
         end
     end
     print("[NKM] Engine SSAO depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
