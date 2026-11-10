@@ -61,13 +61,6 @@ bool IsNKMGeometryNearest(float2 uv)
     return nkmIsGeometry && (sourceIsSky || nkmDepth.a > sourceDepth.a + 0.0000005);
 }
 
-float2 ReadMergedNormal(float2 uv)
-{
-    return IsNKMGeometryNearest(uv)
-        ? tex2Dlod(NKMNormalBuffer, float4(uv, 0, 0)).xy
-        : tex2Dlod(NormalBuffer, float4(uv, 0, 0)).xy;
-}
-
 float3 SafeUnpackWorldPos(float3 packedPosition)
 {
     float3 signValue = float3(
@@ -248,12 +241,19 @@ float3 CalculateNKMPointLights(float3 worldPosition, float3 normal)
 float4 main(PS_INPUT input) : COLOR0
 {
     float2 uv = input.vTexCoord;
-    float4 worldPositionDepth = ReadMergedWorldPosDepth(uv);
+
+    // NKM is a separately rasterized runtime world and can be coplanar with
+    // the host BSP. Do not let an equal/near-equal Source depth sample steal
+    // the receiver pixel: its NKM position and normal must come from the
+    // dedicated NKM GBuffer. The merged Source/NKM depth remains useful for
+    // AO and screen-space blocker queries below.
+    float4 worldPositionDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
     if (abs(worldPositionDepth.a - NKM_SKY_DEPTH) < 0.0000005)
         discard;
 
     float3 worldPosition = SafeUnpackWorldPos(worldPositionDepth.rgb);
-    float3 worldNormal = Decode(ReadMergedNormal(uv));
+    float2 packedNormal = tex2Dlod(NKMNormalBuffer, float4(uv, 0, 0)).xy;
+    float3 worldNormal = Decode(packedNormal);
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
 
     float ao = CalculateLocalAO(uv, worldPosition, worldNormal);
