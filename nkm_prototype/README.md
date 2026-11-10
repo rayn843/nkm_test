@@ -4,7 +4,7 @@
 
 - Adds per-pixel NKM ambient/directional lighting from the dedicated NKM world-position and normal buffers.
 - Evaluates AO, NKM ambient/directional lighting (pixel mode), and point lights in one unmasked full-screen pass over NKM receiver pixels; AO and screen-space blockers currently use NKM-only depth.
-- Only NKM receiver pixels are shaded in this pass. Source BSP geometry, players and props are not included as occluders yet; screen-space contact shadows are opt-in and the fullscreen pass preserves destination alpha.
+- Only NKM receiver pixels are shaded in this pass. Source BSP geometry, players and props are not included as occluders yet; screen-space contact shadows are opt-in and ordinary NKM world materials ignore vertex alpha.
 - Preserves vertex lighting as the default compatibility mode. After rebuilding `shaders/fxc/nkm_deferred_lighting_ps30.vcs`, enable the new path with `nkm_gshader_pixel_lighting 1` before the map's chunks load.
 
 - The optional seventh NKM GShader debug panel decodes `_rt_NKM_WPDepth` into repeatable RGB world-coordinate bands. Build `shaders/nkm_wp_position_debug_ps30.hlsl` as `shaders/fxc/nkm_wp_position_debug_ps30.vcs` with the same Source shader compiler used for the deferred shader.
