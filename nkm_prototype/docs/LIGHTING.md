@@ -32,7 +32,7 @@ Vertex lighting is optional in NKM format v1. Legacy maps without it still valid
 
 When the updated `nkm_deferred_lighting_ps30.vcs` is installed and `nkm_gshader_pixel_lighting 1` is set before the map's chunks load, NKM ambient and directional light are evaluated per pixel from GShader's reconstructed world-position and world-normal buffers. In this mode the client does not multiply NKM vertex colors by the server-side `nkmLighting` bake. The existing vertex bake remains the compatibility path by default.
 
-All NKM point lights are uploaded to the GShader LUT in pixel mode and evaluated per pixel in a separate full-screen pass. This pass is not stencil-limited, so NKM point lights can affect NKM geometry, opaque players and opaque props. The NKM ambient/directional/AO pass remains restricted to the visible NKM stencil mask, so NKM AO does not darken the entire host BSP map.
+AO, NKM ambient/directional lighting (when pixel mode is enabled), and all NKM point lights are evaluated together in one unmasked full-screen pass over the visible opaque GShader GBuffer. The pass does not use the NKM stencil mask to limit lighting, so Source BSP surfaces and visible NKM surfaces are handled by the same pixel shader. Opaque players and props are included when they are represented in GShader's depth/normal buffers. The NKM stencil mask is retained only as an optional debug visualization.
 
 Directional and point shadows are screen-space approximations using the GShader world-position buffer. Off-screen occluders and transparent materials are not represented by the opaque GBuffer. Imported BSP displacement `lit` mode uses its albedo path when pixel lighting is enabled; its original LDR per-vertex bake remains available in compatibility mode.
 
