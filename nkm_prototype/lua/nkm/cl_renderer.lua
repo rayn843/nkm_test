@@ -100,6 +100,7 @@ local GSHADER_NKM_VERTEX_NORMAL_MATERIAL = CreateMaterial("nkm_gshader_vertex_no
     ["$basetexture"] = "color/white",
     ["$vertexcolor"] = "1",
     ["$vertexalpha"] = "1",
+    ["$linearwrite"] = "1",
     ["$nocull"] = "0"
 })
 
