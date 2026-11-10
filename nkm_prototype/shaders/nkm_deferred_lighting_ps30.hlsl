@@ -224,10 +224,12 @@ float4 main(PS_INPUT input) : COLOR0
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
 
     float ao = CalculateLocalAO(uv, worldPosition, worldNormal);
-    float3 staticLighting = CalculateNKMStaticLighting(worldPosition, worldNormal);
+    float3 staticLighting = NKMAmbient.w > 0.5
+        ? CalculateNKMStaticLighting(worldPosition, worldNormal)
+        : float3(1.0, 1.0, 1.0);
     float3 directLight = CalculateNKMPointLights(worldPosition, worldNormal);
-    // SceneBuffer is unlit NKM albedo in the masked static pass and opaque-scene
-    // color in the full-screen point-light pass.
+    // NKM pass applies AO and optional static lighting. The full-screen point
+    // pass leaves pixels outside lights unchanged and adds only direct light.
     float3 albedoProxy = max(sceneColor.rgb, float3(0.12, 0.12, 0.12));
     float3 outputColor = sceneColor.rgb * ao * staticLighting + directLight * albedoProxy;
     return float4(saturate(outputColor), sceneColor.a);
