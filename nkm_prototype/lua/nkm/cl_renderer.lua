@@ -1698,9 +1698,29 @@ local function drawNKMReconstruction(material, target, worldProjection, eyePosit
     return true
 end
 
+local NKM_SOURCE_MODEL_NORMAL_PROP_CLASSES = {
+    prop_physics = true,
+    prop_physics_multiplayer = true,
+    prop_dynamic = true,
+    prop_dynamic_override = true,
+    prop_ragdoll = true
+}
+
 local function isSourceModelNormalCandidate(entity, localPlayer)
     if not IsValid(entity) or entity:IsWorld() or entity:GetNoDraw() then return false end
     if entity:GetRenderMode() ~= RENDERMODE_NORMAL then return false end
+
+    -- Do not call DrawModel on players/NPCs/weapons here. Their draw paths can
+    -- execute addon-specific hooks (for example weapon worldmodel attachments)
+    -- which assume the normal player render context and may error in this RT pass.
+    if isfunction(entity.IsPlayer) and entity:IsPlayer() then return false end
+    if isfunction(entity.IsNPC) and entity:IsNPC() then return false end
+    if isfunction(entity.IsWeapon) and entity:IsWeapon() then return false end
+
+    -- Restrict this experimental re-render to stock opaque prop classes. Custom
+    -- scripted entities stay on GShader's depth-reconstructed normal fallback.
+    local class = entity:GetClass()
+    if not NKM_SOURCE_MODEL_NORMAL_PROP_CLASSES[class] then return false end
 
     local model = entity:GetModel()
     if not isstring(model) or model == "" or string.sub(model, 1, 1) == "*" then return false end
@@ -1712,7 +1732,6 @@ local function isSourceModelNormalCandidate(entity, localPlayer)
         return false
     end
 
-    if entity == localPlayer and not entity:ShouldDrawLocalPlayer() then return false end
     if isfunction(entity.IsDormant) and entity:IsDormant() then return false end
     return true
 end
