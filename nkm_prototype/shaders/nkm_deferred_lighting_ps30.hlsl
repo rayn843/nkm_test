@@ -2,11 +2,12 @@
 // Built against the GShader-library / Source SDK shader compiler toolchain.
 #include "common_octahedron_encoding.h"
 
-sampler WorldPosBuffer       : register(s0); // GShader: _rt_WPDepth
-sampler DynamicLightBuffer   : register(s2); // NKM: 2x32 RGBA32F LUT
-sampler SceneBuffer          : register(s3); // GMod screen effect texture
-sampler NKMWorldPosBuffer    : register(s4); // NKM-only reconstructed world position/depth
-sampler NKMNormalBuffer      : register(s5); // NKM-only reconstructed encoded world normals
+// screenspace_general exposes BASETEXTURE + TEXTURE1..TEXTURE3 (s0..s3).
+// Keep every production input inside those four material texture slots.
+sampler NKMWorldPosBuffer    : register(s0); // _rt_NKM_WPDepth
+sampler NKMNormalBuffer      : register(s1); // _rt_NKM_Normals
+sampler DynamicLightBuffer   : register(s2); // 2x32 RGBA32F NKM point-light LUT
+sampler SceneBuffer          : register(s3); // _rt_FullFrameFB
 
 // c0: x=light count, y=AO radius, z=AO strength, w=contact shadows enabled
 const float4 NKMParams : register(c0);
@@ -36,19 +37,9 @@ struct PS_INPUT
     float2 vTexCoord : TEXCOORD0;
 };
 
-float4 ReadMergedWorldPosDepth(float2 uv)
+float4 ReadNKMWorldPosDepth(float2 uv)
 {
-    float4 sourceDepth = tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
-    float4 nkmDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
-    bool nkmIsGeometry = abs(nkmDepth.a - NKM_SKY_DEPTH) >= 0.0000005;
-    bool sourceIsSky = abs(sourceDepth.a - NKM_SKY_DEPTH) < 0.0000005;
-
-    // GShader stores reciprocal linear depth in alpha: larger values are nearer.
-    // Merge the NKM-only reconstructed buffer with the Source BSP GBuffer.
-    if (nkmIsGeometry && (sourceIsSky || nkmDepth.a > sourceDepth.a + 0.0000005))
-        return nkmDepth;
-
-    return sourceDepth;
+    return tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
 }
 
 float3 SafeUnpackWorldPos(float3 packedPosition)
@@ -66,8 +57,8 @@ float ReadContactVisibility(float3 worldPosition, float3 normal, float3 toLight,
     if (NKMParams.w < 0.5 || lightDistance < 8.0)
         return 1.0;
 
-    // Six short screen-space ray steps. The GBuffer includes Source BSP and
-    // NKM depth, so BSP walls can block NKM lights without receiving the light.
+    // Six short screen-space ray steps against the NKM-only depth buffer.
+    // Source BSP occluders require a separate sampling pass and are not included yet.
     float3 rayOrigin = worldPosition + normal * 2.0;
     [unroll]
     for (int stepIndex = 1; stepIndex <= 6; ++stepIndex)
@@ -83,7 +74,7 @@ float ReadContactVisibility(float3 worldPosition, float3 normal, float3 toLight,
         if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
             continue;
 
-        float sceneDepth = ReadMergedWorldPosDepth(sampleUV).a;
+        float sceneDepth = ReadNKMWorldPosDepth(sampleUV).a;
         if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -118,7 +109,7 @@ float ReadDirectionalVisibility(float3 worldPosition, float3 normal, float3 ligh
         if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
             continue;
 
-        float sceneDepth = ReadMergedWorldPosDepth(sampleUV).a;
+        float sceneDepth = ReadNKMWorldPosDepth(sampleUV).a;
         if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -174,7 +165,7 @@ float CalculateLocalAO(float2 uv, float3 worldPosition, float3 normal)
     for (int sampleIndex = 0; sampleIndex < 8; ++sampleIndex)
     {
         float2 sampleUV = uv + offsets[sampleIndex] * pixel * 2.0;
-        float4 neighborDepth = ReadMergedWorldPosDepth(sampleUV);
+        float4 neighborDepth = ReadNKMWorldPosDepth(sampleUV);
         if (abs(neighborDepth.a - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -232,11 +223,9 @@ float4 main(PS_INPUT input) : COLOR0
 {
     float2 uv = input.vTexCoord;
 
-    // NKM is a separately rasterized runtime world and can be coplanar with
-    // the host BSP. Do not let an equal/near-equal Source depth sample steal
-    // the receiver pixel: its NKM position and normal must come from the
-    // dedicated NKM GBuffer. The merged Source/NKM depth remains useful for
-    // AO and screen-space blocker queries below.
+    // Only the dedicated NKM buffers are used for receiver pixels. This pass
+    // intentionally does not sample GShader's Source buffers: screenspace_general
+    // exposes four material texture slots, all of which are assigned below.
     float4 worldPositionDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
     if (abs(worldPositionDepth.a - NKM_SKY_DEPTH) < 0.0000005)
         discard;
