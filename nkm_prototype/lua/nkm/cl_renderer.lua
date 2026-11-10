@@ -903,13 +903,13 @@ local NKM_GShaderNormalDecodeMaterial
 local function ensureNKMGShaderBufferResources()
     local width, height = ScrW(), ScrH()
     local ready = NKM_GShaderRawDepthRT and NKM_GShaderWorldPosRT and NKM_GShaderNormalRT
-        and NKM_GShaderDecodedNormalRT
         and NKM_GShaderRawDepthRT:Width() == width and NKM_GShaderRawDepthRT:Height() == height
         and NKM_GShaderWorldPosRT:Width() == width and NKM_GShaderWorldPosRT:Height() == height
         and NKM_GShaderNormalRT:Width() == width and NKM_GShaderNormalRT:Height() == height
-        and NKM_GShaderDecodedNormalRT:Width() == width and NKM_GShaderDecodedNormalRT:Height() == height
-    if ready and NKM_GShaderWorldPosMaterial and NKM_GShaderNormalMaterial
-        and NKM_GShaderNormalDecodeMaterial then return true end
+    local debugReady = not NKM.GShaderNKMBufferDebug
+        or (NKM_GShaderDecodedNormalRT and NKM_GShaderDecodedNormalRT:Width() == width
+            and NKM_GShaderDecodedNormalRT:Height() == height and NKM_GShaderNormalDecodeMaterial)
+    if ready and NKM_GShaderWorldPosMaterial and NKM_GShaderNormalMaterial and debugReady then return true end
 
     local flags = bit.bor(1, 4, 8, 256, 512, 32768, 8388608)
     local okRaw, rawDepth = pcall(GetRenderTargetEx,
@@ -926,22 +926,31 @@ local function ensureNKMGShaderBufferResources()
     local okNormal, normals = pcall(GetRenderTargetEx,
         "_rt_NKM_Normals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
         MATERIAL_RT_DEPTH_NONE, flags, 0, normalFormat)
-    -- The GShader decoder writes signed world normals to COLOR0. Keep this
-    -- diagnostic target in float format so negative components are preserved.
-    local okDecodedNormal, decodedNormals = pcall(GetRenderTargetEx,
-        "_rt_NKM_DecodedNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
-        MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA32323232F)
-
-    if not okRaw or not rawDepth or not okWorld or not worldPos or not okNormal or not normals
-        or not okDecodedNormal or not decodedNormals then
-        NKM.GShaderNKMBufferLastError = tostring(rawDepth or worldPos or normals or decodedNormals or "GetRenderTargetEx failed")
+    if not okRaw or not rawDepth or not okWorld or not worldPos or not okNormal or not normals then
+        NKM.GShaderNKMBufferLastError = tostring(rawDepth or worldPos or normals or "GetRenderTargetEx failed")
         return false
     end
 
     NKM_GShaderRawDepthRT = rawDepth
     NKM_GShaderWorldPosRT = worldPos
     NKM_GShaderNormalRT = normals
-    NKM_GShaderDecodedNormalRT = decodedNormals
+
+    if NKM.GShaderNKMBufferDebug then
+        local decodedReady = NKM_GShaderDecodedNormalRT
+            and NKM_GShaderDecodedNormalRT:Width() == width
+            and NKM_GShaderDecodedNormalRT:Height() == height
+        if not decodedReady then
+            local decodedOK, decodedNormals = pcall(GetRenderTargetEx,
+                "_rt_NKM_DecodedNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+                MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
+            if decodedOK and decodedNormals then
+                NKM_GShaderDecodedNormalRT = decodedNormals
+            else
+                NKM_GShaderDecodedNormalRT = nil
+                NKM.GShaderNKMBufferDebugLastError = tostring(decodedNormals or "decoded normal RT creation failed")
+            end
+        end
+    end
 
     if not NKM_GShaderWorldPosMaterial then
         local materialOK, material = pcall(CreateMaterial, "nkm_gshader_worldpos_reconstruction",
@@ -1017,15 +1026,17 @@ local function ensureNKMGShaderBufferResources()
                 ["$vertexalpha"] = "1"
             })
         if not materialOK or not material then
-            NKM.GShaderNKMBufferLastError = tostring(material or "normal decode debug material failed")
-            return false
+            NKM_GShaderNormalDecodeMaterial = nil
+            NKM.GShaderNKMBufferDebugLastError = tostring(material or "normal decode debug material failed")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderNormalDecodeMaterial = nil
+                NKM.GShaderNKMBufferDebugLastError = "GShader normal decode shader is unavailable"
+            else
+                NKM_GShaderNormalDecodeMaterial = material
+            end
         end
-        local errorOK, isError = pcall(material.IsError, material)
-        if not errorOK or isError then
-            NKM.GShaderNKMBufferLastError = "GShader normal decode shader is unavailable"
-            return false
-        end
-        NKM_GShaderNormalDecodeMaterial = material
     end
 
     return true
