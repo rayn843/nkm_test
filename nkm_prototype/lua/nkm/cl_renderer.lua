@@ -950,6 +950,11 @@ local function ensureNKMGShaderBufferResources()
             NKM.GShaderNKMBufferLastError = tostring(material or "world position reconstruction material failed")
             return false
         end
+        local errorOK, isError = pcall(material.IsError, material)
+        if not errorOK or isError then
+            NKM.GShaderNKMBufferLastError = "GShader world-position reconstruction shader is unavailable"
+            return false
+        end
         NKM_GShaderWorldPosMaterial = material
     end
 
@@ -975,6 +980,11 @@ local function ensureNKMGShaderBufferResources()
             })
         if not materialOK or not material then
             NKM.GShaderNKMBufferLastError = tostring(material or "normal reconstruction material failed")
+            return false
+        end
+        local errorOK, isError = pcall(material.IsError, material)
+        if not errorOK or isError then
+            NKM.GShaderNKMBufferLastError = "GShader normal reconstruction shader is unavailable"
             return false
         end
         NKM_GShaderNormalMaterial = material
@@ -1045,19 +1055,21 @@ local function drawNKMRawDepth(viewSetup)
     return true, nil, drawnMeshes
 end
 
-local function drawNKMReconstruction(material, target, worldProjection, eyePosition, rawDepth, worldPos)
-    material:SetMatrix("$INVVIEWPROJMAT", worldProjection:GetInverse())
-    if eyePosition then
-        material:SetFloat("$c0_x", eyePosition.x)
-        material:SetFloat("$c0_y", eyePosition.y)
-        material:SetFloat("$c0_z", eyePosition.z)
-    end
-
-    if rawDepth then material:SetTexture("$basetexture", rawDepth) end
-    if worldPos then material:SetTexture("$texture2", worldPos) end
+local function drawNKMReconstruction(material, target, worldProjection, eyePosition, rawDepth, worldPos, frameBuffer)
     local pushedTarget = false
     local cameraStarted = false
     local ok, err = pcall(function()
+        material:SetMatrix("$INVVIEWPROJMAT", worldProjection:GetInverse())
+        if eyePosition then
+            material:SetFloat("$c0_x", eyePosition.x)
+            material:SetFloat("$c0_y", eyePosition.y)
+            material:SetFloat("$c0_z", eyePosition.z)
+        end
+
+        if rawDepth then material:SetTexture("$basetexture", rawDepth) end
+        if worldPos then material:SetTexture("$texture2", worldPos) end
+        if frameBuffer then material:SetTexture("$texture1", frameBuffer) end
+
         render.PushRenderTarget(target)
         pushedTarget = true
         render.Clear(0, 0, 0, 0, false, false)
@@ -1102,10 +1114,9 @@ local function buildNKMReconstructionBuffers(viewSetup)
     end
 
     local frameBuffer = render.GetScreenEffectTexture()
-    if frameBuffer then NKM_GShaderNormalMaterial:SetTexture("$texture1", frameBuffer) end
     local normalOK, normalError = drawNKMReconstruction(
         NKM_GShaderNormalMaterial, NKM_GShaderNormalRT,
-        worldProjection, nil, NKM_GShaderRawDepthRT, NKM_GShaderWorldPosRT)
+        worldProjection, nil, NKM_GShaderRawDepthRT, NKM_GShaderWorldPosRT, frameBuffer)
     if not normalOK then
         NKM.GShaderNKMBufferLastError = "NKM normal reconstruction failed: " .. tostring(normalError)
         return false
