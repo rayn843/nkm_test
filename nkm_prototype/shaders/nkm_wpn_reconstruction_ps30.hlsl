@@ -7,7 +7,7 @@
 #include "common_octahedron_encoding.h"
 
 sampler BASETEXTURE       : register(s0);
-sampler FrameBuffer       : register(s1);
+sampler SourceWorldPosBuffer : register(s1);
 sampler WPDepthBuffer     : register(s2);
 
 struct PS_INPUT {
@@ -55,7 +55,16 @@ float4 main(PS_INPUT frag) : COLOR0 {
         worldNormal = float3(0.0, 0.0, 1.0);
     }
 
-    // NKM's deferred shader consumes the GShader octahedral normal in RG.
-    // Tangent/B/A are unused by this NKM-only buffer consumer.
-    return float4(Encode(worldNormal), 0.0, 1.0);
+    // Compare the separately reconstructed NKM surface against the visible
+    // Source/GShader surface at the same screen pixel. Reciprocal linear depth
+    // is larger for nearer surfaces. Keep NKM when depths tie (for coplanar
+    // host-BSP overlays), but reject its lighting receiver when Source is in front.
+    float sourceDepth = tex2Dlod(SourceWorldPosBuffer, float4(uv, 0, 0)).a;
+    bool sourceIsGeometry = sourceDepth > 0.000251;
+    bool sourceOccludesNKM = sourceIsGeometry && sourceDepth > center.a + 0.0000005;
+    float receiverVisible = sourceOccludesNKM ? 0.0 : 1.0;
+
+    // RG contains the GShader octahedral normal. B is the NKM-visible receiver
+    // mask consumed by the deferred lighting pass; alpha remains opaque.
+    return float4(Encode(worldNormal), receiverVisible, 1.0);
 }
