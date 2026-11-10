@@ -7,6 +7,8 @@
 - Includes opaque players and props when their depth/normals are present in GShader's reconstructed buffers; the NKM stencil is debug-only.
 - Preserves vertex lighting as the default compatibility mode. After rebuilding `shaders/fxc/nkm_deferred_lighting_ps30.vcs`, enable the new path with `nkm_gshader_pixel_lighting 1` before the map's chunks load.
 
+- The optional seventh NKM GShader debug panel decodes `_rt_NKM_WPDepth` into repeatable RGB world-coordinate bands. Build `shaders/nkm_wp_position_debug_ps30.hlsl` as `shaders/fxc/nkm_wp_position_debug_ps30.vcs` with the same Source shader compiler used for the deferred shader; the panel stays unavailable and reports an error until that VCS is installed.
+
 NKM (NikNaks Map Runtime) is an experimental custom world format and runtime for Garry's Mod. It renders world geometry from NKM map data, streams chunks to clients, caches chunk payloads on disk, creates server-side VPhysics collision proxies, and provides custom NKM trace APIs. Version 0.9.7 adds an LDR BSP displacement lightmap importer that transfers RGBExp32 samples onto displacement grid vertices, keeps WorldVertexTransition alpha blending, and adds an optional baked per-vertex lighting render mode.
 
 ## New in 0.9.6.1 — Source-accurate BSP displacement import
