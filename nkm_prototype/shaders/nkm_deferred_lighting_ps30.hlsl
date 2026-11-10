@@ -3,7 +3,6 @@
 #include "common_octahedron_encoding.h"
 
 sampler WorldPosBuffer       : register(s0); // GShader: _rt_WPDepth
-sampler NormalBuffer         : register(s1); // GShader: _rt_NormalsTangents
 sampler DynamicLightBuffer   : register(s2); // NKM: 2x32 RGBA32F LUT
 sampler SceneBuffer          : register(s3); // GMod screen effect texture
 sampler NKMWorldPosBuffer    : register(s4); // NKM-only reconstructed world position/depth
@@ -50,15 +49,6 @@ float4 ReadMergedWorldPosDepth(float2 uv)
         return nkmDepth;
 
     return sourceDepth;
-}
-
-bool IsNKMGeometryNearest(float2 uv)
-{
-    float4 sourceDepth = tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
-    float4 nkmDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
-    bool nkmIsGeometry = abs(nkmDepth.a - NKM_SKY_DEPTH) >= 0.0000005;
-    bool sourceIsSky = abs(sourceDepth.a - NKM_SKY_DEPTH) < 0.0000005;
-    return nkmIsGeometry && (sourceIsSky || nkmDepth.a > sourceDepth.a + 0.0000005);
 }
 
 float3 SafeUnpackWorldPos(float3 packedPosition)
