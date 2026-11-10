@@ -64,6 +64,10 @@ NKM.GShaderLastMaskDraws = 0
 NKM.GShaderNKMStaticPassCount = NKM.GShaderNKMStaticPassCount or 0
 NKM.GShaderGlobalPointPassCount = NKM.GShaderGlobalPointPassCount or 0
 NKM.GShaderScenePassCount = NKM.GShaderScenePassCount or 0
+NKM.GShaderDepthPassCount = NKM.GShaderDepthPassCount or 0
+NKM.GShaderDepthMeshDrawCount = NKM.GShaderDepthMeshDrawCount or 0
+NKM.GShaderLastDepthPassAt = nil
+NKM.GShaderLastDepthPassMeshes = 0
 NKM.GShaderPixelLighting = false
 local NKM_GShaderPixelLightingConVar = CreateClientConVar(
     "nkm_gshader_pixel_lighting", "0", true, false,
@@ -1562,6 +1566,13 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
     -- that pass too, using Source's DepthWrite shader so its reconstructed
     -- WorldPos/Normals include NKM geometry as well as the BSP scene.
     if bDrawingDepth then
+        -- Count the engine's actual depth-pass callbacks separately from the
+        -- later full-screen lighting callback. A fullscreen pass alone does
+        -- not prove NKM geometry made it into GShader's source depth buffer.
+        NKM.GShaderDepthPassCount = (NKM.GShaderDepthPassCount or 0) + 1
+        NKM.GShaderLastDepthPassAt = RealTime()
+        local drawnMeshes = 0
+
         if NKM.GShaderBridgeEnabled and hasGShaderAPI() and shouldRunGShaderLighting() and #NKM.RenderMeshes > 0 then
             local ok, err = pcall(function()
                 render.CullMode(NKM.CullModeSetting == 1 and MATERIAL_CULLMODE_CW or MATERIAL_CULLMODE_CCW)
@@ -1572,6 +1583,7 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
                     if shouldDraw and entry.mesh and entry.mesh:IsValid() then
                         render.SetMaterial(GSHADER_DEPTH_MATERIAL)
                         entry.mesh:Draw()
+                        drawnMeshes = drawnMeshes + 1
                     end
                 end
             end)
@@ -1582,6 +1594,9 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
                 NKM.GShaderLastError = "NKM GShader depth pre-pass failed: " .. tostring(err)
             end
         end
+
+        NKM.GShaderLastDepthPassMeshes = drawnMeshes
+        NKM.GShaderDepthMeshDrawCount = (NKM.GShaderDepthMeshDrawCount or 0) + drawnMeshes
         return
     end
 
@@ -1709,6 +1724,11 @@ concommand.Add("nkm_gshader_status", function()
     print("[NKM] Pixel lighting requested/active: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
         .. "/" .. tostring(NKM.GShaderPixelLighting == true))
     print("[NKM] Full-scene deferred passes: " .. tostring(NKM.GShaderScenePassCount or 0))
+    print("[NKM] NKM depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
+        .. "; last depth meshes submitted=" .. tostring(NKM.GShaderLastDepthPassMeshes or 0)
+        .. "; cumulative mesh draws=" .. tostring(NKM.GShaderDepthMeshDrawCount or 0)
+        .. (NKM.GShaderLastDepthPassAt and string.format("; depth callback %.2fs ago", math.max(0, RealTime() - NKM.GShaderLastDepthPassAt)) or "; no depth callback seen"))
+    print("[NKM] Render meshes currently loaded: " .. tostring(#(NKM.RenderMeshes or {})))
     print("[NKM] Reconstruction hook seen: " .. tostring(NKM.GShaderLastHookAt ~= nil)
         .. (NKM.GShaderLastHookAt and string.format(" (%.2fs ago)", math.max(0, RealTime() - NKM.GShaderLastHookAt)) or ""))
     print("[NKM] NKM dynamic point lights: " .. tostring(#(NKM.ClientDynamicLights or {})))
