@@ -1,9 +1,14 @@
 // Packs GShader's reconstructed world normal with a per-pixel Source receiver mask.
 // Source depth is reciprocal linear depth: larger values are closer to the camera.
+// The normal filter is edge-aware: it averages nearby normals only when depth and
+// normal direction agree, reducing visible depth-triangle faceting on models.
 
 sampler SourceWorldPosBuffer : register(s0); // GShader _rt_WPDepth
 sampler NKMWorldPosBuffer    : register(s1); // NKM _rt_NKM_WPDepth
 sampler SourceNormalBuffer   : register(s2); // GShader _rt_NormalsTangents
+
+const float4 SmoothingParams : register(c0); // x=strength, y=relative depth tolerance, z=min normal dot, w=center weight
+float2 TexelSize : register(c4);
 
 struct PS_INPUT
 {
@@ -12,7 +17,92 @@ struct PS_INPUT
 };
 
 static const float SOURCE_SKY_DEPTH = 0.00025;
-static const float NKM_DEPTH_EPSILON = 0.0000005;
+
+float3 DecodeSourceNormal(float2 encoded)
+{
+    float2 f = encoded * 2.0 - 1.0;
+    float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = saturate(-n.z);
+    n.xy += n.xy >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
+float2 OctWrapSourceNormal(float2 value)
+{
+    float2 signs = float2(value.x >= 0.0 ? 1.0 : -1.0,
+                          value.y >= 0.0 ? 1.0 : -1.0);
+    return (1.0 - abs(value.yx)) * signs;
+}
+
+float2 EncodeSourceNormal(float3 normal)
+{
+    normal /= max(abs(normal.x) + abs(normal.y) + abs(normal.z), 0.000001);
+    normal.xy = normal.z >= 0.0 ? normal.xy : OctWrapSourceNormal(normal.xy);
+    return normal.xy * 0.5 + 0.5;
+}
+
+float3 SmoothSourceNormal(float2 uv, float4 centerDepth, float3 centerNormal)
+{
+    float strength = saturate(SmoothingParams.x);
+    if (strength <= 0.001 || centerDepth.a <= SOURCE_SKY_DEPTH)
+        return centerNormal;
+
+    // Eight immediate neighbours soften small faceting; four wider taps spread
+    // the smoothing across larger low-poly triangles without a large blur radius.
+    static const float2 offsets[12] = {
+        float2(-1.0, -1.0), float2( 0.0, -1.0), float2( 1.0, -1.0),
+        float2(-1.0,  0.0),                       float2( 1.0,  0.0),
+        float2(-1.0,  1.0), float2( 0.0,  1.0), float2( 1.0,  1.0),
+        float2(-3.0,  0.0), float2( 3.0,  0.0),
+        float2( 0.0, -3.0), float2( 0.0,  3.0)
+    };
+    static const float spatialWeights[12] = {
+        0.70, 1.00, 0.70,
+        1.00,        1.00,
+        0.70, 1.00, 0.70,
+        0.45, 0.45, 0.45, 0.45
+    };
+
+    float depthTolerance = max(SmoothingParams.y, 0.001);
+    float minimumNormalDot = saturate(SmoothingParams.z);
+    float normalRange = max(1.0 - minimumNormalDot, 0.001);
+    float centerWeight = max(SmoothingParams.w, 0.1);
+
+    float3 normalSum = centerNormal * centerWeight;
+    float totalWeight = centerWeight;
+
+    [unroll]
+    for (int sampleIndex = 0; sampleIndex < 12; ++sampleIndex)
+    {
+        float2 sampleUV = saturate(uv + offsets[sampleIndex] * TexelSize);
+        float4 sampleDepth = tex2Dlod(SourceWorldPosBuffer, float4(sampleUV, 0, 0));
+        if (sampleDepth.a <= SOURCE_SKY_DEPTH)
+            continue;
+
+        float relativeDepthDelta = abs(sampleDepth.a - centerDepth.a)
+            / max(centerDepth.a, SOURCE_SKY_DEPTH);
+        float depthWeight = saturate(1.0 - relativeDepthDelta / depthTolerance);
+        if (depthWeight <= 0.001)
+            continue;
+
+        float2 sampleEncodedNormal = tex2Dlod(
+            SourceNormalBuffer, float4(sampleUV, 0, 0)).rg;
+        float3 sampleNormal = DecodeSourceNormal(sampleEncodedNormal);
+        float normalAgreement = dot(centerNormal, sampleNormal);
+        float normalWeight = saturate(
+            (normalAgreement - minimumNormalDot) / normalRange);
+        if (normalWeight <= 0.001)
+            continue;
+
+        float weight = spatialWeights[sampleIndex]
+            * depthWeight * normalWeight;
+        normalSum += sampleNormal * weight;
+        totalWeight += weight;
+    }
+
+    float3 filteredNormal = normalize(normalSum / max(totalWeight, 0.001));
+    return normalize(lerp(centerNormal, filteredNormal, strength));
+}
 
 float4 main(PS_INPUT input) : COLOR0
 {
@@ -23,7 +113,7 @@ float4 main(PS_INPUT input) : COLOR0
 
     bool sourceHasGeometry = sourcePositionDepth.a > SOURCE_SKY_DEPTH + 0.0000001;
     bool nkmHasGeometry = nkmPositionDepth.a > SOURCE_SKY_DEPTH + 0.0000001;
-    float depthBias = max(NKM_DEPTH_EPSILON, nkmPositionDepth.a * 0.0005);
+    float depthBias = max(0.0000005, nkmPositionDepth.a * 0.0005);
 
     // A Source pixel is eligible only when an NKM surface is actually behind
     // it at this screen pixel. If no NKM surface exists, leave the Source scene
@@ -33,6 +123,10 @@ float4 main(PS_INPUT input) : COLOR0
     bool sourceIsVisibleReceiver = sourceHasGeometry && nkmHasGeometry
         && sourcePositionDepth.a > nkmPositionDepth.a + depthBias;
 
-    // RG retains GShader's per-pixel octahedral world normal; B is receiver mask.
-    return float4(sourceNormal.rg, sourceIsVisibleReceiver ? 1.0 : 0.0, 1.0);
+    float3 centerNormal = DecodeSourceNormal(sourceNormal.rg);
+    float3 smoothedNormal = SmoothSourceNormal(uv, sourcePositionDepth, centerNormal);
+
+    // RG remains octahedrally encoded; B remains the receiver-visibility mask.
+    return float4(EncodeSourceNormal(smoothedNormal),
+        sourceIsVisibleReceiver ? 1.0 : 0.0, 1.0);
 }
