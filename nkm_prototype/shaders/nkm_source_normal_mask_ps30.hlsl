@@ -67,14 +67,16 @@ float3 SmoothSourceNormal(float2 uv, float4 centerDepth, float3 centerNormal)
         1.00, 1.00, 1.00,
         1.00,        1.00,
         1.00, 1.00, 1.00,
-        0.75, 0.75, 0.75,
-        0.75,        0.75,
-        0.75, 0.75, 0.75,
-        0.45, 0.45, 0.45,
-        0.45,        0.45,
-        0.45, 0.45, 0.45
+        0.55, 0.55, 0.55,
+        0.55,        0.55,
+        0.55, 0.55, 0.55,
+        0.25, 0.25, 0.25,
+        0.25,        0.25,
+        0.25, 0.25, 0.25
     };
 
+    // Higher normal threshold protects hard edges; the squared falloff makes
+    // neighbours on a different face contribute much less than coplanar ones.
     float minimumNormalDot = saturate(SmoothingParams.z);
     float normalRange = max(1.0 - minimumNormalDot, 0.001);
     float centerWeight = max(SmoothingParams.w, 0.05);
@@ -95,7 +97,8 @@ float3 SmoothSourceNormal(float2 uv, float4 centerDepth, float3 centerNormal)
         // gradually across a sloped mesh without allowing distant background
         // surfaces to bleed through silhouettes.
         float sampleRadius = max(abs(offset.x), abs(offset.y));
-        float depthTolerance = max(SmoothingParams.y, 0.001) * sampleRadius;
+        float depthTolerance = max(SmoothingParams.y, 0.001)
+            * (1.0 + max(sampleRadius - 1.0, 0.0) * 0.25);
         float relativeDepthDelta = abs(sampleDepth.a - centerDepth.a)
             / max(centerDepth.a, SOURCE_SKY_DEPTH);
         float depthWeight = saturate(1.0 - relativeDepthDelta / depthTolerance);
@@ -108,6 +111,7 @@ float3 SmoothSourceNormal(float2 uv, float4 centerDepth, float3 centerNormal)
         float normalAgreement = dot(centerNormal, sampleNormal);
         float normalWeight = saturate(
             (normalAgreement - minimumNormalDot) / normalRange);
+        normalWeight *= normalWeight;
         if (normalWeight <= 0.001)
             continue;
 
