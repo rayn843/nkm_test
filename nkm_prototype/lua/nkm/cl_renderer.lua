@@ -1923,10 +1923,10 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
     draw.SimpleText("NKM normals (packed)", "DermaDefault", x3, y + height + 4, color_white)
     if NKM_GShaderDecodedNormalRT then
-        draw.SimpleText("Normals improved", "DermaDefault", x4, y + height + 4, color_white)
+        draw.SimpleText("NKM normals (UV derivatives)", "DermaDefault", x4, y + height + 4, color_white)
     end
     if NKM_GShaderDecodedNormal4TapRT then
-        draw.SimpleText("Normals 4-tap", "DermaDefault", x5, y + height + 4, color_white)
+        draw.SimpleText("Stock GShader 4-tap", "DermaDefault", x5, y + height + 4, color_white)
     end
     if NKM_GShaderDecodedVertexNormalRT then
         draw.SimpleText("Normals from mesh", "DermaDefault", x6, y + height + 4, color_white)
@@ -2819,7 +2819,7 @@ concommand.Add("nkm_gshader_status", function()
         print("[NKM] NKM GBuffer error: " .. tostring(NKM.GShaderNKMBufferLastError))
     end
     if NKM.GShaderNKMBufferDebug then
-        print("[NKM] NKM normal debug: improved decoded=" .. tostring(NKM_GShaderDecodedNormalRT ~= nil)
+        print("[NKM] NKM normal debug: custom NKM decoded=" .. tostring(NKM_GShaderDecodedNormalRT ~= nil)
             .. "; WP XYZ decoded=" .. tostring(NKM_GShaderDecodedWorldPosRT ~= nil)
             .. "; WP debug shader=" .. tostring(NKM_GShaderWorldPosDebugMaterial ~= nil)
             .. "; WP sampler2 shader=" .. tostring(NKM_GShaderWorldPosSampler2Material ~= nil)
