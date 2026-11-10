@@ -25,11 +25,13 @@ float4 main(PS_INPUT input) : COLOR0
     bool nkmHasGeometry = nkmPositionDepth.a > SOURCE_SKY_DEPTH + 0.0000001;
     float depthBias = max(NKM_DEPTH_EPSILON, nkmPositionDepth.a * 0.0005);
 
-    // A Source pixel is eligible only if it is actually in front of the NKM
-    // surface at this pixel, or if no NKM surface exists here. Coplanar BSP/NKM
-    // pixels belong to the NKM pass, avoiding double shading.
-    bool sourceIsVisibleReceiver = sourceHasGeometry
-        && (!nkmHasGeometry || sourcePositionDepth.a > nkmPositionDepth.a + depthBias);
+    // A Source pixel is eligible only when an NKM surface is actually behind
+    // it at this screen pixel. If no NKM surface exists, leave the Source scene
+    // untouched: otherwise the Source pass would also relight ordinary room
+    // walls, floors and ceilings which are not NKM receivers.
+    // Coplanar BSP/NKM pixels belong to the NKM pass, avoiding double shading.
+    bool sourceIsVisibleReceiver = sourceHasGeometry && nkmHasGeometry
+        && sourcePositionDepth.a > nkmPositionDepth.a + depthBias;
 
     // RG retains GShader's per-pixel octahedral world normal; B is receiver mask.
     return float4(sourceNormal.rg, sourceIsVisibleReceiver ? 1.0 : 0.0, 1.0);
