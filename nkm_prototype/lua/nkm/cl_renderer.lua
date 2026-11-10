@@ -80,7 +80,7 @@ local NKM_GShaderPixelLightingConVar = CreateClientConVar(
     "Use the rebuilt NKM GShader shader for per-pixel ambient/directional/static-point lighting."
 )
 local NKM_GShaderContactShadowsConVar = CreateClientConVar(
-    "nkm_gshader_contact_shadows", "1", true, false,
+    "nkm_gshader_contact_shadows", "0", true, false,
     "Enable NKM screen-space point/directional contact shadows."
 )
 local NKM_GShaderAOConVar = CreateClientConVar(
@@ -2149,7 +2149,12 @@ local function drawNKMSceneLighting(viewSetup)
         -- One unmasked full-screen pass shades visible NKM receiver pixels.
         -- Source depth is not part of this four-sampler pass.
         resetNKMStencilState()
-        render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
+        -- Replace RGB with the shader result, but preserve destination alpha.
+        -- The screen alpha channel can carry depth data; copying SceneBuffer.a
+        -- back over it can make later Source rendering/translucency behave oddly.
+        render.OverrideBlend(true,
+            BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD,
+            BLEND_ZERO, BLEND_ONE, BLENDFUNC_ADD)
         render.SetMaterial(material)
         -- GShader's 2D screen quad shares the exact screen UV domain used while
         -- reconstructing _rt_WPDepth and _rt_NormalsTangents. Avoid the cached
