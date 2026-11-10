@@ -244,5 +244,5 @@ float4 main(PS_INPUT input) : COLOR0
     // pass leaves pixels outside lights unchanged and adds only direct light.
     float3 albedoProxy = max(sceneColor.rgb, float3(0.12, 0.12, 0.12));
     float3 outputColor = sceneColor.rgb * ao * staticLighting + directLight * albedoProxy;
-    return float4(saturate(outputColor), 1.0);
+    return float4(saturate(outputColor), sceneColor.a);
 }
