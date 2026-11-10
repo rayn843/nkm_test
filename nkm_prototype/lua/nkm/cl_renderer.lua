@@ -94,6 +94,10 @@ local NKM_GShaderEntityLightingConVar = CreateClientConVar(
     "nkm_gshader_entity_lighting", "1", true, false,
     "Apply NKM deferred lighting to visible Source players and opaque entities."
 )
+local NKM_GShaderSourceNormalSmoothingConVar = CreateClientConVar(
+    "nkm_gshader_source_normal_smoothing", "0.85", true, false,
+    "Edge-aware smoothing strength for screen-space Source model lighting normals (0-1)."
+)
 
 local GSHADER_NKM_STENCIL_BIT = 128
 local GSHADER_MAX_DYNAMIC_LIGHTS = 32
@@ -1664,6 +1668,11 @@ local function drawNKMSourceNormalMask()
 
     local pushedTarget, cameraStarted = false, false
     local ok, err = pcall(function()
+        setNKMShaderTexelSize(material, sourceNormals)
+        material:SetFloat("$c0_x", math.Clamp(NKM_GShaderSourceNormalSmoothingConVar:GetFloat(), 0, 1))
+        material:SetFloat("$c0_y", 0.075)
+        material:SetFloat("$c0_z", 0.15)
+        material:SetFloat("$c0_w", 2.5)
         material:SetTexture("$basetexture", sourceWorldPosition)
         material:SetTexture("$texture1", NKM_GShaderWorldPosRT)
         material:SetTexture("$texture2", sourceNormals)
@@ -3016,6 +3025,8 @@ concommand.Add("nkm_lighting_status", function()
     print("[NKM] Entity lighting: enabled=" .. tostring(NKM_GShaderEntityLightingConVar:GetBool())
         .. "; Source passes=" .. tostring(NKM.GShaderEntityPassCount or 0)
         .. (NKM.GShaderEntityLastError and ("; error=" .. tostring(NKM.GShaderEntityLastError)) or ""))
+    print("[NKM] Source normal smoothing: " .. string.format("%.2f", math.Clamp(
+        NKM_GShaderSourceNormalSmoothingConVar:GetFloat(), 0, 1)))
     print("[NKM] Deferred lighting uses separate NKM and Source receiver passes; Source pixels are filtered by a per-pixel Source-vs-NKM depth mask.")
     print("[NKM] Source normal mask ready: " .. tostring(NKM_GShaderSourceNormalRT ~= nil)
         .. (NKM.GShaderEntityLastError and ("; error=" .. tostring(NKM.GShaderEntityLastError)) or ""))
