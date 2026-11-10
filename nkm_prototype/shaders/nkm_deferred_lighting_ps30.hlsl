@@ -6,6 +6,8 @@ sampler WorldPosBuffer       : register(s0); // GShader: _rt_WPDepth
 sampler NormalBuffer         : register(s1); // GShader: _rt_NormalsTangents
 sampler DynamicLightBuffer   : register(s2); // NKM: 2x32 RGBA32F LUT
 sampler SceneBuffer          : register(s3); // GMod screen effect texture
+sampler NKMWorldPosBuffer    : register(s4); // NKM-only reconstructed world position/depth
+sampler NKMNormalBuffer      : register(s5); // NKM-only reconstructed encoded world normals
 
 // c0: x=light count, y=AO radius, z=AO strength, w=contact shadows enabled
 const float4 NKMParams : register(c0);
@@ -34,6 +36,37 @@ struct PS_INPUT
     float2 pPos      : VPOS;
     float2 vTexCoord : TEXCOORD0;
 };
+
+float4 ReadMergedWorldPosDepth(float2 uv)
+{
+    float4 sourceDepth = tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
+    float4 nkmDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
+    bool nkmIsGeometry = abs(nkmDepth.a - NKM_SKY_DEPTH) >= 0.0000005;
+    bool sourceIsSky = abs(sourceDepth.a - NKM_SKY_DEPTH) < 0.0000005;
+
+    // GShader stores reciprocal linear depth in alpha: larger values are nearer.
+    // Merge the NKM-only reconstructed buffer with the Source BSP GBuffer.
+    if (nkmIsGeometry && (sourceIsSky || nkmDepth.a > sourceDepth.a + 0.0000005))
+        return nkmDepth;
+
+    return sourceDepth;
+}
+
+bool IsNKMGeometryNearest(float2 uv)
+{
+    float4 sourceDepth = tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
+    float4 nkmDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
+    bool nkmIsGeometry = abs(nkmDepth.a - NKM_SKY_DEPTH) >= 0.0000005;
+    bool sourceIsSky = abs(sourceDepth.a - NKM_SKY_DEPTH) < 0.0000005;
+    return nkmIsGeometry && (sourceIsSky || nkmDepth.a > sourceDepth.a + 0.0000005);
+}
+
+float2 ReadMergedNormal(float2 uv)
+{
+    return IsNKMGeometryNearest(uv)
+        ? tex2Dlod(NKMNormalBuffer, float4(uv, 0, 0)).xy
+        : tex2Dlod(NormalBuffer, float4(uv, 0, 0)).xy;
+}
 
 float3 SafeUnpackWorldPos(float3 packedPosition)
 {
@@ -67,7 +100,7 @@ float ReadContactVisibility(float3 worldPosition, float3 normal, float3 toLight,
         if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
             continue;
 
-        float sceneDepth = tex2Dlod(WorldPosBuffer, float4(sampleUV, 0, 0)).a;
+        float sceneDepth = ReadMergedWorldPosDepth(sampleUV).a;
         if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -102,7 +135,7 @@ float ReadDirectionalVisibility(float3 worldPosition, float3 normal, float3 ligh
         if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
             continue;
 
-        float sceneDepth = tex2Dlod(WorldPosBuffer, float4(sampleUV, 0, 0)).a;
+        float sceneDepth = ReadMergedWorldPosDepth(sampleUV).a;
         if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -158,7 +191,7 @@ float CalculateLocalAO(float2 uv, float3 worldPosition, float3 normal)
     for (int sampleIndex = 0; sampleIndex < 8; ++sampleIndex)
     {
         float2 sampleUV = uv + offsets[sampleIndex] * pixel * 2.0;
-        float4 neighborDepth = tex2Dlod(WorldPosBuffer, float4(sampleUV, 0, 0));
+        float4 neighborDepth = ReadMergedWorldPosDepth(sampleUV);
         if (abs(neighborDepth.a - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -215,12 +248,12 @@ float3 CalculateNKMPointLights(float3 worldPosition, float3 normal)
 float4 main(PS_INPUT input) : COLOR0
 {
     float2 uv = input.vTexCoord;
-    float4 worldPositionDepth = tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
+    float4 worldPositionDepth = ReadMergedWorldPosDepth(uv);
     if (abs(worldPositionDepth.a - NKM_SKY_DEPTH) < 0.0000005)
         discard;
 
     float3 worldPosition = SafeUnpackWorldPos(worldPositionDepth.rgb);
-    float3 worldNormal = Decode(tex2Dlod(NormalBuffer, float4(uv, 0, 0)).xy);
+    float3 worldNormal = Decode(ReadMergedNormal(uv));
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
 
     float ao = CalculateLocalAO(uv, worldPosition, worldNormal);

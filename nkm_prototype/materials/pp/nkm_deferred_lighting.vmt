@@ -6,6 +6,8 @@
     "$texture1" "_rt_NormalsTangents"
     "$texture2" "_rt_NKM_DynamicLights"
     "$texture3" "_rt_FullFrameFB"
+    "$texture4" "_rt_NKM_WPDepth"
+    "$texture5" "_rt_NKM_Normals"
 
     "<dx90>"
     {

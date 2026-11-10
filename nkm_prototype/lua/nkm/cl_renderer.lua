@@ -64,6 +64,16 @@ NKM.GShaderLastMaskDraws = 0
 NKM.GShaderNKMStaticPassCount = NKM.GShaderNKMStaticPassCount or 0
 NKM.GShaderGlobalPointPassCount = NKM.GShaderGlobalPointPassCount or 0
 NKM.GShaderScenePassCount = NKM.GShaderScenePassCount or 0
+NKM.GShaderDepthPassCount = NKM.GShaderDepthPassCount or 0
+NKM.GShaderDepthMeshDrawCount = NKM.GShaderDepthMeshDrawCount or 0
+NKM.GShaderLastDepthPassAt = nil
+NKM.GShaderLastDepthPassMeshes = 0
+NKM.GShaderNKMBufferBuildCount = NKM.GShaderNKMBufferBuildCount or 0
+NKM.GShaderNKMBufferLastMeshes = 0
+NKM.GShaderNKMBufferLastAt = nil
+NKM.GShaderNKMBufferReady = false
+NKM.GShaderNKMBufferLastError = nil
+NKM.GShaderNKMBufferDebug = false
 NKM.GShaderPixelLighting = false
 local NKM_GShaderPixelLightingConVar = CreateClientConVar(
     "nkm_gshader_pixel_lighting", "0", true, false,
@@ -882,6 +892,371 @@ local function drawGShaderMaskDebug()
     resetNKMStencilState()
 end
 
+local NKM_GShaderRawDepthRT
+local NKM_GShaderWorldPosRT
+local NKM_GShaderNormalRT
+local NKM_GShaderDecodedNormalRT
+local NKM_GShaderWorldPosMaterial
+local NKM_GShaderNormalMaterial
+local NKM_GShaderNormalDecodeMaterial
+
+local function ensureNKMNormalDecodeDebugResources(width, height, flags)
+    if not NKM.GShaderNKMBufferDebug then
+        NKM.GShaderNKMBufferDebugLastError = nil
+        return true
+    end
+
+    local decodedReady = NKM_GShaderDecodedNormalRT
+        and NKM_GShaderDecodedNormalRT:Width() == width
+        and NKM_GShaderDecodedNormalRT:Height() == height
+    if not decodedReady then
+        local decodedOK, decodedNormals = pcall(GetRenderTargetEx,
+            "_rt_NKM_DecodedNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
+        if decodedOK and decodedNormals then
+            NKM_GShaderDecodedNormalRT = decodedNormals
+        else
+            NKM_GShaderDecodedNormalRT = nil
+            NKM.GShaderNKMBufferDebugLastError = tostring(decodedNormals or "decoded normal RT creation failed")
+        end
+    end
+
+    if not NKM_GShaderNormalDecodeMaterial then
+        local materialOK, material = pcall(CreateMaterial, "nkm_gshader_normal_decode_debug",
+            "screenspace_general", {
+                ["$pixshader"] = "wn_tangetns_decode_ps30",
+                ["$vertexshader"] = "pp_vs30",
+                ["$basetexture"] = "_rt_NKM_Normals",
+                ["$no_fullbright"] = "1",
+                ["$ignorez"] = "1",
+                ["$VERTEXTRANSFORM"] = "1",
+                ["$WRITEALPHA"] = "1",
+                ["$copyalpha"] = "1",
+                ["$vertexalpha"] = "1"
+            })
+        if not materialOK or not material then
+            NKM_GShaderNormalDecodeMaterial = nil
+            NKM.GShaderNKMBufferDebugLastError = tostring(material or "normal decode debug material failed")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderNormalDecodeMaterial = nil
+                NKM.GShaderNKMBufferDebugLastError = "GShader normal decode shader is unavailable"
+            else
+                NKM_GShaderNormalDecodeMaterial = material
+            end
+        end
+    end
+
+    return NKM_GShaderDecodedNormalRT ~= nil and NKM_GShaderNormalDecodeMaterial ~= nil
+end
+
+local function ensureNKMGShaderBufferResources()
+    local width, height = ScrW(), ScrH()
+    local ready = NKM_GShaderRawDepthRT and NKM_GShaderWorldPosRT and NKM_GShaderNormalRT
+        and NKM_GShaderRawDepthRT:Width() == width and NKM_GShaderRawDepthRT:Height() == height
+        and NKM_GShaderWorldPosRT:Width() == width and NKM_GShaderWorldPosRT:Height() == height
+        and NKM_GShaderNormalRT:Width() == width and NKM_GShaderNormalRT:Height() == height
+    local coreMaterialsReady = NKM_GShaderWorldPosMaterial and NKM_GShaderNormalMaterial
+    local flags = bit.bor(1, 4, 8, 256, 512, 32768, 8388608)
+    if ready and coreMaterialsReady then
+        ensureNKMNormalDecodeDebugResources(width, height, flags)
+        return true
+    end
+
+    local okRaw, rawDepth = pcall(GetRenderTargetEx,
+        "_rt_NKM_RawDepth", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+        MATERIAL_RT_DEPTH_SEPARATE, flags, 0, IMAGE_FORMAT_RGBA32323232F)
+    local okWorld, worldPos = pcall(GetRenderTargetEx,
+        "_rt_NKM_WPDepth", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+        MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA32323232F)
+    local normalFormat = IMAGE_FORMAT_RGB888
+    if isfunction(shaderlib.GetWorldNormalsImageFormat) then
+        local formatOK, format = pcall(shaderlib.GetWorldNormalsImageFormat)
+        if formatOK and format then normalFormat = format end
+    end
+    local okNormal, normals = pcall(GetRenderTargetEx,
+        "_rt_NKM_Normals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+        MATERIAL_RT_DEPTH_NONE, flags, 0, normalFormat)
+    if not okRaw or not rawDepth or not okWorld or not worldPos or not okNormal or not normals then
+        NKM.GShaderNKMBufferLastError = tostring(rawDepth or worldPos or normals or "GetRenderTargetEx failed")
+        return false
+    end
+
+    NKM_GShaderRawDepthRT = rawDepth
+    NKM_GShaderWorldPosRT = worldPos
+    NKM_GShaderNormalRT = normals
+
+    if not NKM_GShaderWorldPosMaterial then
+        local materialOK, material = pcall(CreateMaterial, "nkm_gshader_worldpos_reconstruction",
+            "screenspace_general", {
+                ["$pixshader"] = "wp_reconstruction_ps30",
+                ["$vertexshader"] = "pp_vs30",
+                ["$basetexture"] = "_rt_NKM_RawDepth",
+                ["$texture1"] = "_rt_ResolvedFullFrameDepthSky",
+                ["$no_fullbright"] = "1",
+                ["$ignorez"] = "1",
+                ["$VERTEXTRANSFORM"] = "1",
+                ["$LINEARREAD_BASETEXTURE"] = "1",
+                ["$WRITEALPHA"] = "1",
+                ["$copyalpha"] = "1",
+                ["$vertexalpha"] = "1",
+                ["$linearwrite"] = "1"
+            })
+        if not materialOK or not material then
+            NKM.GShaderNKMBufferLastError = tostring(material or "world position reconstruction material failed")
+            return false
+        end
+        local errorOK, isError = pcall(material.IsError, material)
+        if not errorOK or isError then
+            NKM.GShaderNKMBufferLastError = "GShader world-position reconstruction shader is unavailable"
+            return false
+        end
+        NKM_GShaderWorldPosMaterial = material
+    end
+
+    if not NKM_GShaderNormalMaterial then
+        local materialOK, material = pcall(CreateMaterial, "nkm_gshader_normal_reconstruction",
+            "screenspace_general", {
+                ["$pixshader"] = "wpn_reconstruction_improved_ps30",
+                ["$vertexshader"] = "reconstruction_vs30",
+                ["$basetexture"] = "_rt_NKM_RawDepth",
+                ["$texture1"] = "_rt_FullFrameFB",
+                ["$texture2"] = "_rt_NKM_WPDepth",
+                ["$no_fullbright"] = "1",
+                ["$vertexcolor"] = "1",
+                ["$ignorez"] = "1",
+                ["$VERTEXTRANSFORM"] = "1",
+                ["$LINEARREAD_BASETEXTURE"] = "1",
+                ["$LINEARREAD_TEXTURE1"] = "1",
+                ["$WRITEALPHA"] = "1",
+                ["$copyalpha"] = "1",
+                ["$vertexalpha"] = "1",
+                ["$c0_w"] = "1",
+                ["$c1_w"] = "0"
+            })
+        if not materialOK or not material then
+            NKM.GShaderNKMBufferLastError = tostring(material or "normal reconstruction material failed")
+            return false
+        end
+        local errorOK, isError = pcall(material.IsError, material)
+        if not errorOK or isError then
+            NKM.GShaderNKMBufferLastError = "GShader normal reconstruction shader is unavailable"
+            return false
+        end
+        NKM_GShaderNormalMaterial = material
+    end
+
+    ensureNKMNormalDecodeDebugResources(width, height, flags)
+    return true
+end
+
+-- Match GShader's world-position reconstruction matrix exactly: position is
+-- supplied separately through EyePos(), so the view matrix contains rotation only.
+local function getNKMReconstructionViewProjection(viewSetup)
+    local forward = -viewSetup.angles:Forward()
+    local right = viewSetup.angles:Right()
+    local up = -viewSetup.angles:Up()
+    local viewRotation = Matrix({
+        { right.x, right.y, right.z, 0 },
+        { up.x, up.y, up.z, 0 },
+        { forward.x, forward.y, forward.z, 0 },
+        { 0, 0, 0, 1 }
+    })
+    local projection = shaderlib.GetProjMatrix(viewSetup)
+    projection:Mul(viewRotation)
+    return projection
+end
+
+local function drawNKMRawDepth(viewSetup)
+    local pushedTarget = false
+    local cameraStarted = false
+    local drawnMeshes = 0
+    local width, height = ScrW(), ScrH()
+    local ok, err = pcall(function()
+        render.PushRenderTarget(NKM_GShaderRawDepthRT)
+        pushedTarget = true
+        -- White is Source's far/sky depth value. The target has its own Z buffer.
+        render.Clear(255, 255, 255, 255, true, true)
+
+        cam.Start3D(viewSetup.origin, viewSetup.angles, viewSetup.fov,
+            0, 0, width, height, viewSetup.znear or 1, viewSetup.zfar or 32768)
+        cameraStarted = true
+        render.CullMode(NKM.CullModeSetting == 1 and MATERIAL_CULLMODE_CW or MATERIAL_CULLMODE_CCW)
+        render.OverrideDepthEnable(true, true)
+        render.SetBlend(1)
+
+        for _, entry in ipairs(NKM.RenderMeshes or {}) do
+            local isBSPDisplacement = entry.isBSPDisplacement == true
+            local shouldDraw = not (isBSPDisplacement and NKM.ClientBSPDisplacementRenderEnabled == false)
+            if shouldDraw and entry.mesh and entry.mesh:IsValid() then
+                render.SetMaterial(GSHADER_DEPTH_MATERIAL)
+                entry.mesh:Draw()
+                drawnMeshes = drawnMeshes + 1
+            end
+        end
+
+        render.OverrideDepthEnable(false, false)
+        render.CullMode(MATERIAL_CULLMODE_CCW)
+        cam.End3D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End3D) end
+    render.OverrideDepthEnable(false, false)
+    render.CullMode(MATERIAL_CULLMODE_CCW)
+    render.SetColorModulation(1, 1, 1)
+    render.SetBlend(1)
+    if pushedTarget then pcall(render.PopRenderTarget) end
+
+    if not ok then return false, tostring(err), drawnMeshes end
+    return true, nil, drawnMeshes
+end
+
+local function drawNKMReconstruction(material, target, worldProjection, eyePosition, rawDepth, worldPos, frameBuffer)
+    local pushedTarget = false
+    local cameraStarted = false
+    local ok, err = pcall(function()
+        material:SetMatrix("$INVVIEWPROJMAT", worldProjection:GetInverse())
+        if eyePosition then
+            material:SetFloat("$c0_x", eyePosition.x)
+            material:SetFloat("$c0_y", eyePosition.y)
+            material:SetFloat("$c0_z", eyePosition.z)
+        end
+
+        if rawDepth then material:SetTexture("$basetexture", rawDepth) end
+        if worldPos then material:SetTexture("$texture2", worldPos) end
+        if frameBuffer then material:SetTexture("$texture1", frameBuffer) end
+
+        render.PushRenderTarget(target)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(material)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+local function drawNKMDecodedNormalDebug()
+    if not NKM_GShaderNormalDecodeMaterial or not NKM_GShaderDecodedNormalRT or not NKM_GShaderNormalRT then
+        return false, "normal decode debug resources are unavailable"
+    end
+
+    local pushedTarget = false
+    local cameraStarted = false
+    local ok, err = pcall(function()
+        NKM_GShaderNormalDecodeMaterial:SetTexture("$basetexture", NKM_GShaderNormalRT)
+        render.PushRenderTarget(NKM_GShaderDecodedNormalRT)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(NKM_GShaderNormalDecodeMaterial)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+local function buildNKMReconstructionBuffers(viewSetup)
+    NKM.GShaderNKMBufferReady = false
+    if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() or not viewSetup then return false end
+    if not shouldRunGShaderLighting() then return false end
+    if not ensureNKMGShaderBufferResources() then return false end
+
+    local rawOK, rawError, drawnMeshes = drawNKMRawDepth(viewSetup)
+    if not rawOK then
+        NKM.GShaderNKMBufferLastError = "NKM-only depth render failed: " .. tostring(rawError)
+        return false
+    end
+
+    local projectionOK, worldProjection = pcall(getNKMReconstructionViewProjection, viewSetup)
+    if not projectionOK or not worldProjection then
+        NKM.GShaderNKMBufferLastError = "NKM view-projection build failed: " .. tostring(worldProjection)
+        return false
+    end
+
+    local eyePosition = EyePos()
+    local worldOK, worldError = drawNKMReconstruction(
+        NKM_GShaderWorldPosMaterial, NKM_GShaderWorldPosRT,
+        worldProjection, eyePosition, NKM_GShaderRawDepthRT, nil)
+    if not worldOK then
+        NKM.GShaderNKMBufferLastError = "NKM world-position reconstruction failed: " .. tostring(worldError)
+        return false
+    end
+
+    local frameBuffer = render.GetScreenEffectTexture()
+    local normalOK, normalError = drawNKMReconstruction(
+        NKM_GShaderNormalMaterial, NKM_GShaderNormalRT,
+        worldProjection, nil, NKM_GShaderRawDepthRT, NKM_GShaderWorldPosRT, frameBuffer)
+    if not normalOK then
+        NKM.GShaderNKMBufferLastError = "NKM normal reconstruction failed: " .. tostring(normalError)
+        return false
+    end
+
+    -- Optional diagnostic: decode octahedral normal/tangent packing into signed
+    -- world-space RGB. This distinguishes a genuinely constant normal buffer
+    -- from a packed buffer that merely looks gray when shown raw.
+    if NKM.GShaderNKMBufferDebug then
+        local debugOK, debugError = drawNKMDecodedNormalDebug()
+        NKM.GShaderNKMBufferDebugLastError = debugOK and nil or tostring(debugError)
+    else
+        NKM.GShaderNKMBufferDebugLastError = nil
+    end
+
+    NKM.GShaderNKMBufferBuildCount = (NKM.GShaderNKMBufferBuildCount or 0) + 1
+    NKM.GShaderNKMBufferLastMeshes = drawnMeshes
+    NKM.GShaderNKMBufferLastAt = RealTime()
+    NKM.GShaderNKMBufferReady = true
+    NKM.GShaderNKMBufferLastError = nil
+    return true
+end
+
+hook.Add("PostDrawReconstructionPreEffects", "NKM.GShaderNKMBuffer", buildNKMReconstructionBuffers)
+
+hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
+    if not NKM.GShaderNKMBufferDebug then return end
+    if not NKM_GShaderRawDepthRT or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then return end
+
+    local width = math.floor(ScrW() / 5)
+    local height = math.floor(width * ScrH() / math.max(ScrW(), 1))
+    local y = ScrH() - height - 34
+    local gap = 8
+    local x1 = 8
+    local x2 = x1 + width + gap
+    local x3 = x2 + width + gap
+
+    render.DrawTextureToScreenRect(NKM_GShaderRawDepthRT, x1, y, width, height)
+    render.DrawTextureToScreenRect(NKM_GShaderWorldPosRT, x2, y, width, height)
+    render.DrawTextureToScreenRect(NKM_GShaderNormalRT, x3, y, width, height)
+    if NKM_GShaderDecodedNormalRT then
+        render.DrawTextureToScreenRect(NKM_GShaderDecodedNormalRT, x3 + width + gap, y, width, height)
+    end
+    draw.SimpleText("NKM raw depth", "DermaDefault", x1, y + height + 4, color_white)
+    draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
+    draw.SimpleText("NKM normals (packed)", "DermaDefault", x3, y + height + 4, color_white)
+    if NKM_GShaderDecodedNormalRT then
+        draw.SimpleText("NKM normals (decoded)", "DermaDefault", x3 + width + gap, y + height + 4, color_white)
+    end
+    if NKM.GShaderNKMBufferDebugLastError then
+        draw.SimpleText("Normal decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
+            "DermaDefault", 8, y - 18, Color(255, 100, 100))
+    end
+end)
+
 local function drawNKMSceneLighting(viewSetup)
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return false end
     if not updateGShaderDynamicLightLUT() then return false end
@@ -903,7 +1278,13 @@ local function drawNKMSceneLighting(viewSetup)
     local directional = usePixelStatic and (lighting.directional or {}) or {}
 
     local ok, err = pcall(function()
+        if not NKM.GShaderNKMBufferReady or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then
+            error("NKM reconstructed buffers are not ready for this frame")
+        end
+
         local setters = {
+            { material.SetTexture, "$texture4", NKM_GShaderWorldPosRT },
+            { material.SetTexture, "$texture5", NKM_GShaderNormalRT },
             { material.SetMatrix, "$viewprojmat", viewProjection },
             { material.SetFloat, "$c0_x", #pointLights },
             { material.SetFloat, "$c0_y", deferred.aoRadius or 72 },
@@ -993,6 +1374,7 @@ function NKM.ClearClientMap()
     NKM.LoadedClientChunkCount = 0
     NKM.RenderMeshes = {}
     NKM.TraceMap = nil
+    NKM.GShaderNKMBufferReady = false
 end
 
 function NKM.UnloadClientChunk(chunk)
@@ -1562,6 +1944,13 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
     -- that pass too, using Source's DepthWrite shader so its reconstructed
     -- WorldPos/Normals include NKM geometry as well as the BSP scene.
     if bDrawingDepth then
+        -- Count the engine's actual depth-pass callbacks separately from the
+        -- later full-screen lighting callback. A fullscreen pass alone does
+        -- not prove NKM geometry made it into GShader's source depth buffer.
+        NKM.GShaderDepthPassCount = (NKM.GShaderDepthPassCount or 0) + 1
+        NKM.GShaderLastDepthPassAt = RealTime()
+        local drawnMeshes = 0
+
         if NKM.GShaderBridgeEnabled and hasGShaderAPI() and shouldRunGShaderLighting() and #NKM.RenderMeshes > 0 then
             local ok, err = pcall(function()
                 render.CullMode(NKM.CullModeSetting == 1 and MATERIAL_CULLMODE_CW or MATERIAL_CULLMODE_CCW)
@@ -1572,6 +1961,7 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
                     if shouldDraw and entry.mesh and entry.mesh:IsValid() then
                         render.SetMaterial(GSHADER_DEPTH_MATERIAL)
                         entry.mesh:Draw()
+                        drawnMeshes = drawnMeshes + 1
                     end
                 end
             end)
@@ -1582,6 +1972,9 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
                 NKM.GShaderLastError = "NKM GShader depth pre-pass failed: " .. tostring(err)
             end
         end
+
+        NKM.GShaderLastDepthPassMeshes = drawnMeshes
+        NKM.GShaderDepthMeshDrawCount = (NKM.GShaderDepthMeshDrawCount or 0) + drawnMeshes
         return
     end
 
@@ -1709,6 +2102,18 @@ concommand.Add("nkm_gshader_status", function()
     print("[NKM] Pixel lighting requested/active: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
         .. "/" .. tostring(NKM.GShaderPixelLighting == true))
     print("[NKM] Full-scene deferred passes: " .. tostring(NKM.GShaderScenePassCount or 0))
+    print("[NKM] NKM GBuffer builds: " .. tostring(NKM.GShaderNKMBufferBuildCount or 0)
+        .. "; ready=" .. tostring(NKM.GShaderNKMBufferReady == true)
+        .. "; last meshes=" .. tostring(NKM.GShaderNKMBufferLastMeshes or 0)
+        .. (NKM.GShaderNKMBufferLastAt and string.format("; updated %.2fs ago", math.max(0, RealTime() - NKM.GShaderNKMBufferLastAt)) or "; not built yet"))
+    if NKM.GShaderNKMBufferLastError then
+        print("[NKM] NKM GBuffer error: " .. tostring(NKM.GShaderNKMBufferLastError))
+    end
+    print("[NKM] Engine SSAO depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
+        .. "; last depth meshes submitted=" .. tostring(NKM.GShaderLastDepthPassMeshes or 0)
+        .. "; cumulative mesh draws=" .. tostring(NKM.GShaderDepthMeshDrawCount or 0)
+        .. (NKM.GShaderLastDepthPassAt and string.format("; depth callback %.2fs ago", math.max(0, RealTime() - NKM.GShaderLastDepthPassAt)) or "; no depth callback seen"))
+    print("[NKM] Render meshes currently loaded: " .. tostring(#(NKM.RenderMeshes or {})))
     print("[NKM] Reconstruction hook seen: " .. tostring(NKM.GShaderLastHookAt ~= nil)
         .. (NKM.GShaderLastHookAt and string.format(" (%.2fs ago)", math.max(0, RealTime() - NKM.GShaderLastHookAt)) or ""))
     print("[NKM] NKM dynamic point lights: " .. tostring(#(NKM.ClientDynamicLights or {})))
@@ -1719,6 +2124,19 @@ concommand.Add("nkm_gshader_status", function()
     print("[NKM] LUT uploaded: " .. tostring(NKM.GShaderLUTGeneration == NKM.ClientGeneration))
     if NKM.GShaderLUTLastError then print("[NKM] LUT error: " .. tostring(NKM.GShaderLUTLastError)) end
     if NKM.GShaderLastError then print("[NKM] Last error: " .. tostring(NKM.GShaderLastError)) end
+end)
+
+concommand.Add("nkm_gshader_debug_buffers", function(_, _, args)
+    local value = args and args[1]
+    if value == "1" then
+        NKM.GShaderNKMBufferDebug = true
+    elseif value == "0" then
+        NKM.GShaderNKMBufferDebug = false
+    elseif value ~= nil then
+        print("[NKM] Usage: nkm_gshader_debug_buffers [0|1]")
+        return
+    end
+    print("[NKM] NKM GBuffer debug: " .. tostring(NKM.GShaderNKMBufferDebug == true))
 end)
 
 concommand.Add("nkm_gshader_debug_mask", function(_, _, args)
