@@ -907,7 +907,16 @@ local NKM_GShaderNormal4TapDecodeMaterial
 local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     if not NKM.GShaderNKMBufferDebug then
         NKM.GShaderNKMBufferDebugLastError = nil
+        NKM.GShaderNKMBufferDebug4TapError = nil
         return true
+    end
+
+    -- This function is outside ensureNKMGShaderBufferResources, so it must
+    -- resolve the format locally rather than using that function's local.
+    local normalFormat = IMAGE_FORMAT_RGB888
+    if isfunction(shaderlib.GetWorldNormalsImageFormat) then
+        local formatOK, format = pcall(shaderlib.GetWorldNormalsImageFormat)
+        if formatOK and format then normalFormat = format end
     end
 
     local decodedReady = NKM_GShaderDecodedNormalRT
@@ -961,7 +970,7 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
             MATERIAL_RT_DEPTH_NONE, flags, 0, normalFormat)
         NKM_GShaderNormal4TapRT = targetOK and target or nil
         if not NKM_GShaderNormal4TapRT then
-            NKM.GShaderNKMBufferDebugLastError = tostring(target or "4-tap normal RT creation failed")
+            NKM.GShaderNKMBufferDebug4TapError = tostring(target or "4-tap normal RT creation failed")
         end
     end
 
@@ -974,7 +983,7 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
             MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
         NKM_GShaderDecodedNormal4TapRT = targetOK and target or nil
         if not NKM_GShaderDecodedNormal4TapRT then
-            NKM.GShaderNKMBufferDebugLastError = tostring(target or "4-tap decoded normal RT creation failed")
+            NKM.GShaderNKMBufferDebug4TapError = tostring(target or "4-tap decoded normal RT creation failed")
         end
     end
 
@@ -1000,12 +1009,12 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
             })
         if not materialOK or not material then
             NKM_GShaderNormal4TapMaterial = nil
-            NKM.GShaderNKMBufferDebugLastError = tostring(material or "4-tap normal material failed")
+            NKM.GShaderNKMBufferDebug4TapError = tostring(material or "4-tap normal material failed")
         else
             local errorOK, isError = pcall(material.IsError, material)
             if not errorOK or isError then
                 NKM_GShaderNormal4TapMaterial = nil
-                NKM.GShaderNKMBufferDebugLastError = "GShader 4-tap normal shader is unavailable"
+                NKM.GShaderNKMBufferDebug4TapError = "GShader 4-tap normal shader is unavailable"
             else
                 NKM_GShaderNormal4TapMaterial = material
             end
@@ -1027,16 +1036,26 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
             })
         if not materialOK or not material then
             NKM_GShaderNormal4TapDecodeMaterial = nil
-            NKM.GShaderNKMBufferDebugLastError = tostring(material or "4-tap normal decode material failed")
+            NKM.GShaderNKMBufferDebug4TapError = tostring(material or "4-tap normal decode material failed")
         else
             local errorOK, isError = pcall(material.IsError, material)
             if not errorOK or isError then
                 NKM_GShaderNormal4TapDecodeMaterial = nil
-                NKM.GShaderNKMBufferDebugLastError = "GShader 4-tap normal decode shader is unavailable"
+                NKM.GShaderNKMBufferDebug4TapError = "GShader 4-tap normal decode shader is unavailable"
             else
                 NKM_GShaderNormal4TapDecodeMaterial = material
             end
         end
+    end
+
+    local fourTapReady = NKM_GShaderNormal4TapRT ~= nil
+        and NKM_GShaderDecodedNormal4TapRT ~= nil
+        and NKM_GShaderNormal4TapMaterial ~= nil
+        and NKM_GShaderNormal4TapDecodeMaterial ~= nil
+    if fourTapReady then
+        NKM.GShaderNKMBufferDebug4TapError = nil
+    elseif not NKM.GShaderNKMBufferDebug4TapError then
+        NKM.GShaderNKMBufferDebug4TapError = "4-tap debug resources are incomplete"
     end
 
     return NKM_GShaderDecodedNormalRT ~= nil and NKM_GShaderNormalDecodeMaterial ~= nil
@@ -1312,9 +1331,9 @@ local function buildNKMReconstructionBuffers(viewSetup)
                 worldProjection, nil, NKM_GShaderRawDepthRT,
                 NKM_GShaderWorldPosRT, frameBuffer)
             if fourTapOK then
-                NKM_GShaderNormal4TapDecodeMaterial:SetTexture("$basetexture", NKM_GShaderNormal4TapRT)
                 local pushedTarget, cameraStarted = false, false
                 local decodeOK, decodeError = pcall(function()
+                    NKM_GShaderNormal4TapDecodeMaterial:SetTexture("$basetexture", NKM_GShaderNormal4TapRT)
                     render.PushRenderTarget(NKM_GShaderDecodedNormal4TapRT)
                     pushedTarget = true
                     render.Clear(0, 0, 0, 0, false, false)
@@ -1327,12 +1346,16 @@ local function buildNKMReconstructionBuffers(viewSetup)
                 end)
                 if cameraStarted then pcall(cam.End2D) end
                 if pushedTarget then pcall(render.PopRenderTarget) end
-                if not decodeOK then
-                    NKM.GShaderNKMBufferDebugLastError = "4-tap decode failed: " .. tostring(decodeError)
+                if decodeOK then
+                    NKM.GShaderNKMBufferDebug4TapError = nil
+                else
+                    NKM.GShaderNKMBufferDebug4TapError = "4-tap decode failed: " .. tostring(decodeError)
                 end
             else
-                NKM.GShaderNKMBufferDebugLastError = "4-tap reconstruction failed: " .. tostring(fourTapError)
+                NKM.GShaderNKMBufferDebug4TapError = "4-tap reconstruction failed: " .. tostring(fourTapError)
             end
+        elseif not NKM.GShaderNKMBufferDebug4TapError then
+            NKM.GShaderNKMBufferDebug4TapError = "4-tap debug resources are missing"
         end
     else
         NKM.GShaderNKMBufferDebugLastError = nil
@@ -1381,7 +1404,11 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
         draw.SimpleText("Normals 4-tap", "DermaDefault", x5, y + height + 4, color_white)
     end
     if NKM.GShaderNKMBufferDebugLastError then
-        draw.SimpleText("Normal decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
+        draw.SimpleText("Improved decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
+            "DermaDefault", 8, y - 36, Color(255, 100, 100))
+    end
+    if NKM.GShaderNKMBufferDebug4TapError then
+        draw.SimpleText("4-tap debug: " .. tostring(NKM.GShaderNKMBufferDebug4TapError),
             "DermaDefault", 8, y - 18, Color(255, 100, 100))
     end
 end)
@@ -2237,6 +2264,16 @@ concommand.Add("nkm_gshader_status", function()
         .. (NKM.GShaderNKMBufferLastAt and string.format("; updated %.2fs ago", math.max(0, RealTime() - NKM.GShaderNKMBufferLastAt)) or "; not built yet"))
     if NKM.GShaderNKMBufferLastError then
         print("[NKM] NKM GBuffer error: " .. tostring(NKM.GShaderNKMBufferLastError))
+    end
+    if NKM.GShaderNKMBufferDebug then
+        print("[NKM] NKM normal debug: improved decoded=" .. tostring(NKM_GShaderDecodedNormalRT ~= nil)
+            .. "; 4tap target=" .. tostring(NKM_GShaderNormal4TapRT ~= nil)
+            .. "; 4tap decoded=" .. tostring(NKM_GShaderDecodedNormal4TapRT ~= nil)
+            .. "; 4tap shader=" .. tostring(NKM_GShaderNormal4TapMaterial ~= nil)
+            .. "; 4tap decode=" .. tostring(NKM_GShaderNormal4TapDecodeMaterial ~= nil))
+        if NKM.GShaderNKMBufferDebug4TapError then
+            print("[NKM] NKM 4-tap debug error: " .. tostring(NKM.GShaderNKMBufferDebug4TapError))
+        end
     end
     print("[NKM] Engine SSAO depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
         .. "; last depth meshes submitted=" .. tostring(NKM.GShaderLastDepthPassMeshes or 0)
