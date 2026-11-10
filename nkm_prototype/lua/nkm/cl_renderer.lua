@@ -1425,7 +1425,7 @@ local function ensureNKMGShaderBufferResources()
     if not NKM_GShaderNormalMaterial then
         local materialOK, material = pcall(CreateMaterial, "nkm_gshader_normal_reconstruction",
             "screenspace_general", {
-                ["$pixshader"] = "wpn_reconstruction_improved_ps30",
+                ["$pixshader"] = "nkm_wpn_reconstruction_ps30",
                 ["$vertexshader"] = "reconstruction_vs30",
                 ["$basetexture"] = "_rt_NKM_RawDepth",
                 ["$texture1"] = "_rt_FullFrameFB",
