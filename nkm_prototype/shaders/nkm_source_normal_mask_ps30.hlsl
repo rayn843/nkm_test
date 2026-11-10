@@ -9,6 +9,7 @@ sampler SourceNormalBuffer   : register(s2); // GShader _rt_NormalsTangents
 sampler SourceModelNormalBuffer : register(s3); // Interpolated, skinned Source entity vertex normals
 
 const float4 SmoothingParams : register(c0); // x=strength, y=relative depth tolerance, z=min normal dot, w=center weight
+const float4 ModelNormalParams : register(c1); // x=1 only when model-normal capture succeeded this frame
 float2 TexelSize : register(c4);
 
 struct PS_INPUT
@@ -145,8 +146,11 @@ float4 main(PS_INPUT input) : COLOR0
     bool sourceIsVisibleReceiver = sourceHasGeometry && nkmHasGeometry
         && sourcePositionDepth.a > nkmPositionDepth.a + depthBias;
 
-    float4 modelNormalSample = tex2Dlod(SourceModelNormalBuffer, float4(uv, 0, 0));
-    bool hasInterpolatedModelNormal = modelNormalSample.b > 0.5;
+    float4 modelNormalSample = float4(0, 0, 0, 0);
+    if (ModelNormalParams.x > 0.5)
+        modelNormalSample = tex2Dlod(SourceModelNormalBuffer, float4(uv, 0, 0));
+    bool hasInterpolatedModelNormal = ModelNormalParams.x > 0.5
+        && modelNormalSample.b > 0.5;
     float3 centerNormal = hasInterpolatedModelNormal
         ? DecodeSourceNormal(modelNormalSample.rg)
         : DecodeSourceNormal(sourceNormal.rg);

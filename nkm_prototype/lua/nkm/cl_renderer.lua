@@ -1434,6 +1434,8 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
 end
 
 local function ensureNKMSourceModelNormalResources(width, height, flags)
+    if not NKM_GShaderSourceModelNormalsConVar:GetBool() then return false end
+
     local targetReady = NKM_GShaderSourceModelNormalRT
         and NKM_GShaderSourceModelNormalRT:Width() == width
         and NKM_GShaderSourceModelNormalRT:Height() == height
@@ -1716,13 +1718,22 @@ local function isSourceModelNormalCandidate(entity, localPlayer)
 end
 
 local function drawNKMSourceModelNormalBuffer(viewSetup)
-    local target = NKM_GShaderSourceModelNormalRT
-    if not target then
-        return false, "Source model-normal render target is unavailable", 0
-    end
-
     local enabled = NKM_GShaderSourceModelNormalsConVar:GetBool()
         and NKM_GShaderEntityLightingConVar:GetBool()
+    if not enabled then
+        NKM.GShaderSourceModelNormalPassReady = false
+        NKM.GShaderSourceModelNormalDraws = 0
+        NKM.GShaderSourceModelNormalLastError = nil
+        return true, nil, 0
+    end
+
+    local target = NKM_GShaderSourceModelNormalRT
+    if not target then
+        NKM.GShaderSourceModelNormalPassReady = false
+        NKM.GShaderSourceModelNormalLastError = "Source model-normal render target is unavailable"
+        return false, NKM.GShaderSourceModelNormalLastError, 0
+    end
+
     local material = NKM_GShaderSourceModelNormalMaterial
     local sourceWorldPosition = shaderlib.rt_WPDepth
     local pushedTarget, cameraStarted = false, false
@@ -1826,6 +1837,7 @@ local function drawNKMSourceNormalMask()
         material:SetFloat("$c0_y", 0.008)
         material:SetFloat("$c0_z", 0.35)
         material:SetFloat("$c0_w", 0.25)
+        material:SetFloat("$c1_x", NKM.GShaderSourceModelNormalPassReady == true and 1 or 0)
         material:SetTexture("$basetexture", sourceWorldPosition)
         material:SetTexture("$texture1", NKM_GShaderWorldPosRT)
         material:SetTexture("$texture2", sourceNormals)
