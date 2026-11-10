@@ -2899,6 +2899,38 @@ concommand.Add("nkm_lighting_status", function()
     print("[NKM] AO, ambient/directional and point lights use one unmasked full-screen opaque GBuffer pass.")
 end)
 
+concommand.Add("nkm_gshader_lights", function()
+    local lighting = NKM.ClientLighting or {}
+    local lights = NKM.ClientDynamicLights or {}
+    print("[NKM] Lighting enabled: " .. tostring(lighting.enabled == true)
+        .. "; pixel lighting active: " .. tostring(NKM.GShaderPixelLighting == true)
+        .. "; dynamic point lights: " .. tostring(#lights))
+    for index, light in ipairs(lights) do
+        local position = light.position or {}
+        local color = light.color or {}
+        print(string.format(
+            "[NKM] Point #%d pos=(%.2f, %.2f, %.2f) radius=%.2f color=(%.1f, %.1f, %.1f) intensity=%.3f shadows=%s",
+            index,
+            position[1] or 0, position[2] or 0, position[3] or 0,
+            light.radius or 0,
+            color[1] or 0, color[2] or 0, color[3] or 0,
+            light.intensity or 1,
+            tostring(light.shadows == true)
+        ))
+    end
+    local lut = NKM.GShaderDynamicLightLUT
+    if lut then
+        local widthOK, width = pcall(lut.Width, lut)
+        local heightOK, height = pcall(lut.Height, lut)
+        print("[NKM] Dynamic-light LUT: " .. tostring(widthOK and width or "?")
+            .. "x" .. tostring(heightOK and height or "?")
+            .. "; uploaded=" .. tostring(NKM.GShaderLUTGeneration == NKM.ClientGeneration)
+            .. "; error=" .. tostring(NKM.GShaderLUTLastError))
+    else
+        print("[NKM] Dynamic-light LUT: not created; error=" .. tostring(NKM.GShaderLUTLastError))
+    end
+end)
+
 concommand.Add("nkm_gshader_status", function()
     local available = hasGShaderAPI()
     local material = getNKMDeferredMaterial()
