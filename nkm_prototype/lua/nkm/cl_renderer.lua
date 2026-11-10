@@ -64,6 +64,8 @@ NKM.GShaderLastMaskDraws = 0
 NKM.GShaderNKMStaticPassCount = NKM.GShaderNKMStaticPassCount or 0
 NKM.GShaderGlobalPointPassCount = NKM.GShaderGlobalPointPassCount or 0
 NKM.GShaderScenePassCount = NKM.GShaderScenePassCount or 0
+NKM.GShaderEntityPassCount = NKM.GShaderEntityPassCount or 0
+NKM.GShaderEntityLastError = nil
 NKM.GShaderDepthPassCount = NKM.GShaderDepthPassCount or 0
 NKM.GShaderDepthMeshDrawCount = NKM.GShaderDepthMeshDrawCount or 0
 NKM.GShaderLastDepthPassAt = nil
@@ -86,6 +88,10 @@ local NKM_GShaderContactShadowsConVar = CreateClientConVar(
 local NKM_GShaderAOConVar = CreateClientConVar(
     "nkm_gshader_ao", "1", true, false,
     "Enable NKM screen-space ambient occlusion."
+)
+local NKM_GShaderEntityLightingConVar = CreateClientConVar(
+    "nkm_gshader_entity_lighting", "1", true, false,
+    "Apply NKM deferred lighting to visible Source players and opaque entities."
 )
 
 local GSHADER_NKM_STENCIL_BIT = 128
@@ -995,6 +1001,17 @@ local function configureNKMStencilTest()
     render.SetStencilTestMask(GSHADER_NKM_STENCIL_BIT)
     render.SetStencilReferenceValue(GSHADER_NKM_STENCIL_BIT)
     render.SetStencilCompareFunction(STENCIL_EQUAL)
+    render.SetStencilPassOperation(STENCIL_KEEP)
+    render.SetStencilFailOperation(STENCIL_KEEP)
+    render.SetStencilZFailOperation(STENCIL_KEEP)
+end
+
+local function configureSourceStencilExclusion()
+    render.SetStencilEnable(true)
+    render.SetStencilWriteMask(0)
+    render.SetStencilTestMask(GSHADER_NKM_STENCIL_BIT)
+    render.SetStencilReferenceValue(GSHADER_NKM_STENCIL_BIT)
+    render.SetStencilCompareFunction(STENCIL_NOTEQUAL)
     render.SetStencilPassOperation(STENCIL_KEEP)
     render.SetStencilFailOperation(STENCIL_KEEP)
     render.SetStencilZFailOperation(STENCIL_KEEP)
@@ -2097,21 +2114,18 @@ local function drawNKMSceneLighting(viewSetup)
     local usePixelStatic = NKM.GShaderPixelLighting == true
     local ambient = usePixelStatic and (lighting.ambient or { 32, 32, 32 }) or { 0, 0, 0 }
     local directional = usePixelStatic and (lighting.directional or {}) or {}
+    local sourceWorldPosition = shaderlib.rt_WPDepth
+    local sourceNormals = shaderlib.rt_NormalsTangents
+    local entityLightingEnabled = NKM_GShaderEntityLightingConVar:GetBool()
 
-    local ok, err = pcall(function()
-        if not NKM.GShaderNKMBufferReady or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then
-            error("NKM reconstructed buffers are not ready for this frame")
-        end
-
-        -- Refresh the scene copy before binding s3. screenspace_general only
-        -- exposes BASETEXTURE and TEXTURE1..TEXTURE3 (samplers s0..s3).
+    local function bindLightingPass(worldPositionTexture, normalTexture, sourcePass)
         render.UpdateScreenEffectTexture()
         local sceneTexture = render.GetScreenEffectTexture()
         if not sceneTexture then error("GMod screen-effect texture is unavailable") end
 
         local setters = {
-            { material.SetTexture, "$basetexture", NKM_GShaderWorldPosRT },
-            { material.SetTexture, "$texture1", NKM_GShaderNormalRT },
+            { material.SetTexture, "$basetexture", worldPositionTexture },
+            { material.SetTexture, "$texture1", normalTexture },
             { material.SetTexture, "$texture2", NKM.GShaderDynamicLightLUT },
             { material.SetTexture, "$texture3", sceneTexture },
             { material.SetMatrix, "$viewprojmat", viewProjection },
@@ -2128,7 +2142,8 @@ local function drawNKMSceneLighting(viewSetup)
             { material.SetFloat, "$c2_x", (ambient[1] or 0) / 255 },
             { material.SetFloat, "$c2_y", (ambient[2] or 0) / 255 },
             { material.SetFloat, "$c2_z", (ambient[3] or 0) / 255 },
-            { material.SetFloat, "$c2_w", usePixelStatic and 1 or 0 }
+            { material.SetFloat, "$c2_w", usePixelStatic and 1 or 0 },
+            { material.SetFloat, "$c15_x", sourcePass and 1 or 0 }
         }
 
         -- c3/c4, c5/c6, c7/c8, c9/c10: direction+intensity and color+shadow flag.
@@ -2154,16 +2169,63 @@ local function drawNKMSceneLighting(viewSetup)
             local succeeded, setError = pcall(setter[1], material, setter[2], setter[3])
             if not succeeded then error(setError or ("failed to set " .. setter[2])) end
         end
+    end
 
-        -- One unmasked full-screen pass shades visible NKM receiver pixels.
-        -- Source depth is not part of this four-sampler pass.
-        resetNKMStencilState()
+    local ok, err = pcall(function()
+        if not NKM.GShaderNKMBufferReady or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then
+            error("NKM reconstructed buffers are not ready for this frame")
+        end
+
+        -- Pass 0 shades NKM geometry, using the dedicated NKM receiver mask.
+        bindLightingPass(NKM_GShaderWorldPosRT, NKM_GShaderNormalRT, false)
         render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
+        resetNKMStencilState()
         render.SetMaterial(material)
-        -- GShader's 2D screen quad shares the exact screen UV domain used while
-        -- reconstructing _rt_WPDepth and _rt_NormalsTangents. Avoid the cached
-        -- RenderScene 3D quad, which can drift from a custom view setup.
         shaderlib.DrawScreenQuad()
+
+        -- Pass 1 shades the visible Source scene (players and opaque entities)
+        -- using GShader's already-built world-position and normal buffers.
+        -- A depth-tested NKM stencil mask excludes NKM pixels so overlapping
+        -- host-BSP/NKM surfaces are not lit twice, while foreground entities
+        -- remain eligible for this Source pass.
+        NKM.GShaderEntityLastError = nil
+        if entityLightingEnabled then
+            if not sourceWorldPosition or not sourceNormals then
+                NKM.GShaderEntityLastError = "GShader Source world-position/normal buffers are unavailable"
+            else
+                local expectedMaskMeshes = 0
+                for _, entry in ipairs(NKM.RenderMeshes or {}) do
+                    local isBSPDisplacement = entry.isBSPDisplacement == true
+                    local shouldDraw = not (isBSPDisplacement and NKM.ClientBSPDisplacementRenderEnabled == false)
+                    if shouldDraw and entry.mesh and entry.mesh:IsValid() then
+                        expectedMaskMeshes = expectedMaskMeshes + 1
+                    end
+                end
+
+                bindLightingPass(sourceWorldPosition, sourceNormals, true)
+
+                local useStencilExclusion = expectedMaskMeshes > 0
+                if useStencilExclusion then
+                    clearNKMStencilBit()
+                    local markedMeshes = markVisibleNKMGeometry()
+                    if markedMeshes ~= expectedMaskMeshes then
+                        NKM.GShaderEntityLastError = "NKM stencil exclusion mask did not draw every mesh"
+                        useStencilExclusion = false
+                    else
+                        configureSourceStencilExclusion()
+                    end
+                end
+
+                -- If mask generation failed, skip rather than accidentally
+                -- applying the Source pass over NKM surfaces a second time.
+                if not (expectedMaskMeshes > 0 and not useStencilExclusion) then
+                    render.SetMaterial(material)
+                    shaderlib.DrawScreenQuad()
+                    NKM.GShaderEntityPassCount = (NKM.GShaderEntityPassCount or 0) + 1
+                end
+                resetNKMStencilState()
+            end
+        end
     end)
 
     render.OverrideBlend(false)
@@ -2923,7 +2985,10 @@ concommand.Add("nkm_lighting_status", function()
         .. (NKM.GShaderLUTLastError and (" (" .. tostring(NKM.GShaderLUTLastError) .. ")") or ""))
     print("[NKM] Per-pixel lighting requested: " .. tostring(NKM_GShaderPixelLightingConVar:GetBool())
         .. "; active: " .. tostring(NKM.GShaderPixelLighting == true))
-    print("[NKM] NKM AO, ambient/directional and point lights use one unmasked full-screen pass (NKM-only receiver depth).")
+    print("[NKM] Entity lighting: enabled=" .. tostring(NKM_GShaderEntityLightingConVar:GetBool())
+        .. "; Source passes=" .. tostring(NKM.GShaderEntityPassCount or 0)
+        .. (NKM.GShaderEntityLastError and ("; error=" .. tostring(NKM.GShaderEntityLastError)) or ""))
+    print("[NKM] Deferred lighting uses separate NKM and Source receiver passes; the Source pass excludes visible NKM pixels with stencil.")
 end)
 
 concommand.Add("nkm_gshader_lights", function()

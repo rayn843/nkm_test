@@ -4,10 +4,10 @@
 
 // screenspace_general exposes BASETEXTURE + TEXTURE1..TEXTURE3 (s0..s3).
 // Keep every production input inside those four material texture slots.
-sampler NKMWorldPosBuffer    : register(s0); // _rt_NKM_WPDepth
-sampler NKMNormalBuffer      : register(s1); // _rt_NKM_Normals
-sampler DynamicLightBuffer   : register(s2); // 2x32 RGBA32F NKM point-light LUT
-sampler SceneBuffer          : register(s3); // _rt_FullFrameFB
+sampler WorldPosBuffer      : register(s0); // NKM _rt_NKM_WPDepth or Source _rt_WPDepth
+sampler NormalBuffer        : register(s1); // NKM _rt_NKM_Normals or Source _rt_NormalsTangents
+sampler DynamicLightBuffer  : register(s2); // 2x32 RGBA32F NKM point-light LUT
+sampler SceneBuffer         : register(s3); // _rt_FullFrameFB
 
 // c0: x=light count, y=AO radius, z=AO strength, w=contact shadows enabled
 const float4 NKMParams : register(c0);
@@ -26,6 +26,9 @@ const float4 NKMDir3 : register(c9);
 const float4 NKMDirColor3 : register(c10);
 // GShader sets this through IMaterial:SetMatrix("$viewprojmat", ...).
 const float4x4 ViewProj : register(c11);
+// x=0 shades NKM receivers (B is the receiver-visibility mask);
+// x=1 shades the visible GShader Source scene (B is tangent data, not a mask).
+const float4 LightingPassParams : register(c15);
 
 static const float NKM_SKY_DEPTH = 0.00025;
 static const float NKM_MAX_LIGHTS = 32.0;
@@ -37,9 +40,9 @@ struct PS_INPUT
     float2 vTexCoord : TEXCOORD0;
 };
 
-float4 ReadNKMWorldPosDepth(float2 uv)
+float4 ReadWorldPosDepth(float2 uv)
 {
-    return tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
+    return tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
 }
 
 float3 SafeUnpackWorldPos(float3 packedPosition)
@@ -57,8 +60,8 @@ float ReadContactVisibility(float3 worldPosition, float3 normal, float3 toLight,
     if (NKMParams.w < 0.5 || lightDistance < 8.0)
         return 1.0;
 
-    // Six short screen-space ray steps against the NKM-only depth buffer.
-    // Source BSP occluders require a separate sampling pass and are not included yet.
+    // Six short screen-space ray steps against the depth buffer bound for this pass.
+    // The NKM pass samples NKM depth; the Source pass samples GShader scene depth.
     float3 rayOrigin = worldPosition + normal * 2.0;
     [unroll]
     for (int stepIndex = 1; stepIndex <= 6; ++stepIndex)
@@ -74,7 +77,7 @@ float ReadContactVisibility(float3 worldPosition, float3 normal, float3 toLight,
         if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
             continue;
 
-        float sceneDepth = ReadNKMWorldPosDepth(sampleUV).a;
+        float sceneDepth = ReadWorldPosDepth(sampleUV).a;
         if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -109,7 +112,7 @@ float ReadDirectionalVisibility(float3 worldPosition, float3 normal, float3 ligh
         if (sampleUV.x <= 0.001 || sampleUV.x >= 0.999 || sampleUV.y <= 0.001 || sampleUV.y >= 0.999)
             continue;
 
-        float sceneDepth = ReadNKMWorldPosDepth(sampleUV).a;
+        float sceneDepth = ReadWorldPosDepth(sampleUV).a;
         if (abs(sceneDepth - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -165,7 +168,7 @@ float CalculateLocalAO(float2 uv, float3 worldPosition, float3 normal)
     for (int sampleIndex = 0; sampleIndex < 8; ++sampleIndex)
     {
         float2 sampleUV = uv + offsets[sampleIndex] * pixel * 2.0;
-        float4 neighborDepth = ReadNKMWorldPosDepth(sampleUV);
+        float4 neighborDepth = ReadWorldPosDepth(sampleUV);
         if (abs(neighborDepth.a - NKM_SKY_DEPTH) < 0.0000005)
             continue;
 
@@ -223,19 +226,17 @@ float4 main(PS_INPUT input) : COLOR0
 {
     float2 uv = input.vTexCoord;
 
-    // Only the dedicated NKM buffers are used for receiver pixels. This pass
-    // intentionally does not sample GShader's Source buffers: screenspace_general
-    // exposes four material texture slots, all of which are assigned below.
-    float4 worldPositionDepth = tex2Dlod(NKMWorldPosBuffer, float4(uv, 0, 0));
+    // The Lua bridge binds NKM buffers for pass 0 and GShader Source buffers for
+    // pass 1. Both paths use the same four screenspace_general sampler slots.
+    float4 worldPositionDepth = tex2Dlod(WorldPosBuffer, float4(uv, 0, 0));
     if (abs(worldPositionDepth.a - NKM_SKY_DEPTH) < 0.0000005)
         discard;
 
     float3 worldPosition = SafeUnpackWorldPos(worldPositionDepth.rgb);
-    float4 packedNormal = tex2Dlod(NKMNormalBuffer, float4(uv, 0, 0));
-    // The normal reconstruction pass marks NKM pixels hidden by a nearer
-    // Source surface in the blue channel. Do not apply NKM lighting to that
-    // foreground entity/player pixel.
-    if (packedNormal.b < 0.5)
+    float4 packedNormal = tex2Dlod(NormalBuffer, float4(uv, 0, 0));
+    // In NKM mode, blue stores the receiver-visibility mask. In Source mode,
+    // blue stores GShader's tangent encoding and must not be treated as a mask.
+    if (LightingPassParams.x < 0.5 && packedNormal.b < 0.5)
         discard;
     float3 worldNormal = Decode(packedNormal.xy);
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
