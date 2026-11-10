@@ -30,7 +30,7 @@ Vertex lighting is optional in NKM format v1. Legacy maps without it still valid
 
 ## Deferred per-pixel lighting (GShader)
 
-When the updated `nkm_deferred_lighting_ps30.vcs` is installed and `nkm_gshader_pixel_lighting 1` is set before the map's chunks load, NKM ambient and directional light are evaluated per pixel from GShader's reconstructed world-position and world-normal buffers. In this mode the client does not multiply NKM vertex colors by the server-side `nkmLighting` bake. The existing vertex bake remains the compatibility path by default.
+When the updated `nkm_deferred_lighting_ps30.vcs` is installed and `nkm_gshader_pixel_lighting 1` is set before the map's chunks load, NKM ambient and directional light are evaluated per pixel from the dedicated NKM world-position and world-normal buffers. In this mode the client does not multiply NKM vertex colors by the server-side `nkmLighting` bake. The existing vertex bake remains the compatibility path by default.
 
 AO, NKM ambient/directional lighting (when pixel mode is enabled), and all NKM point lights are evaluated together in one unmasked full-screen pass. NKM receiver pixels always use the dedicated NKM world-position and normal buffers; this is important where runtime NKM meshes coincide with the host BSP, because an equal-depth Source pixel must not replace the NKM surface normal. The merged Source/NKM depth remains available to AO and screen-space blocker queries. This avoids relying on the engine's internal SSAO depth pass to include Lua-drawn IMesh objects. The NKM stencil mask is retained only as an optional debug visualization.
 
