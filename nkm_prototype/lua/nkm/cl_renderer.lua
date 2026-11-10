@@ -282,10 +282,13 @@ local function createNKMLightingMaterial(materialName)
     -- The NKM lighting path deliberately uses a predictable vertex-color shader.
     -- Complex Source world shaders remain available in the non-lit material path.
     local hash = util.CRC(cacheKey)
-    local ok, generated = pcall(CreateMaterial, "nkm_vertex_lit_v5_" .. tostring(hash), "UnlitGeneric", {
+    -- NKM world meshes are opaque. Their vertex alpha is not an opacity
+    -- channel; the only intentional vertex-alpha blending in this renderer
+    -- is the separate BSP displacement blend-layer material.
+    local ok, generated = pcall(CreateMaterial, "nkm_vertex_lit_v6_" .. tostring(hash), "UnlitGeneric", {
         ["$basetexture"] = baseTexture,
         ["$vertexcolor"] = "1",
-        ["$vertexalpha"] = "1"
+        ["$vertexalpha"] = "0"
     })
     if not ok or not generated then generated = DEFAULT_MATERIAL end
     NKMLightingMaterialCache[cacheKey] = generated
@@ -2149,12 +2152,7 @@ local function drawNKMSceneLighting(viewSetup)
         -- One unmasked full-screen pass shades visible NKM receiver pixels.
         -- Source depth is not part of this four-sampler pass.
         resetNKMStencilState()
-        -- Replace RGB with the shader result, but preserve destination alpha.
-        -- The screen alpha channel can carry depth data; copying SceneBuffer.a
-        -- back over it can make later Source rendering/translucency behave oddly.
-        render.OverrideBlend(true,
-            BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD,
-            BLEND_ZERO, BLEND_ONE, BLENDFUNC_ADD)
+        render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
         render.SetMaterial(material)
         -- GShader's 2D screen quad shares the exact screen UV domain used while
         -- reconstructing _rt_WPDepth and _rt_NormalsTangents. Avoid the cached
