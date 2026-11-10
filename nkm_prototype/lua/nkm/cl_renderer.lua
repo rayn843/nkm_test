@@ -1645,24 +1645,19 @@ hook.Add("PostDrawOpaqueRenderables", "NKM.DrawWorld", function(bDrawingDepth, b
     render.SetBlend(1)
 end)
 
--- GShader's deferred hook is executed after it reconstructs _rt_WPDepth and
--- _rt_NormalsTangents. We cache the view setup here, then apply the NKM-only
--- screen pass in PreDrawTranslucentRenderables, after every PostDrawOpaque hook
--- has finished. This avoids dependence on addon hook ordering.
-hook.Add("PostDrawReconstructionLighting", "NKM.GShaderBridgeReady", function(viewSetup)
+-- GShader calls PostDrawReconstructionLighting only after _rt_WPDepth and
+-- _rt_NormalsTangents are fully reconstructed and its RTs have been popped.
+-- Execute both deferred passes here, synchronously. Deferring to another
+-- PreDrawTranslucentRenderables hook is order-dependent because GShader itself
+-- runs reconstruction from that same hook event.
+local function runNKMDeferredLighting(viewSetup)
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return end
     local ok, canDraw = pcall(shaderlib.CanDrawEffects, viewSetup)
     if not ok or not canDraw then return end
-    NKM.GShaderReadyFrame = true
+    if not shouldBuildGShaderMask() or not getNKMDeferredMaterial() then return end
+
     NKM.GShaderLastViewSetup = viewSetup
     NKM.GShaderLastHookAt = RealTime()
-end)
-
-hook.Add("PreDrawTranslucentRenderables", "NKM.GShaderDeferredPass", function(bDrawingDepth, bDrawingSkybox)
-    if bDrawingDepth or bDrawingSkybox then return end
-    if not NKM.GShaderReadyFrame then return end
-    NKM.GShaderReadyFrame = false
-    if not shouldBuildGShaderMask() or not getNKMDeferredMaterial() then return end
 
     local hasNKMStaticPass = NKM.GShaderMaskDebug or hasNKMStaticDeferredLighting()
     if hasNKMStaticPass then
@@ -1671,7 +1666,7 @@ hook.Add("PreDrawTranslucentRenderables", "NKM.GShaderDeferredPass", function(bD
             drawGShaderMaskDebug()
             return
         end
-        if not drawNKMDeferredLighting(NKM.GShaderLastViewSetup, "nkm") then
+        if not drawNKMDeferredLighting(viewSetup, "nkm") then
             if NKM.GShaderLastError then
                 NKM.GShaderLastStatusPrintAt = NKM.GShaderLastStatusPrintAt or 0
                 if RealTime() >= NKM.GShaderLastStatusPrintAt then
@@ -1682,10 +1677,10 @@ hook.Add("PreDrawTranslucentRenderables", "NKM.GShaderDeferredPass", function(bD
         end
     end
 
-    -- All active point lights use the full opaque GBuffer, not the NKM stencil.
-    -- They therefore illuminate NKM geometry, opaque players and opaque props.
+    -- This pass is independent of NKM visibility and stencil. It runs whenever
+    -- the map has active NKM point lights, over all valid opaque GBuffer pixels.
     if #(NKM.ClientDynamicLights or {}) > 0 then
-        if not drawNKMDeferredLighting(NKM.GShaderLastViewSetup, "global") then
+        if not drawNKMDeferredLighting(viewSetup, "global") then
             if NKM.GShaderLastError then
                 NKM.GShaderLastStatusPrintAt = NKM.GShaderLastStatusPrintAt or 0
                 if RealTime() >= NKM.GShaderLastStatusPrintAt then
@@ -1695,7 +1690,9 @@ hook.Add("PreDrawTranslucentRenderables", "NKM.GShaderDeferredPass", function(bD
             end
         end
     end
-end)
+end
+
+hook.Add("PostDrawReconstructionLighting", "NKM.GShaderDeferredPass", runNKMDeferredLighting)
 
 
 concommand.Add("nkm_lighting_status", function()
