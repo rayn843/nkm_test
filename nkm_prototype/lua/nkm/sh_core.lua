@@ -2,7 +2,7 @@ NKM = NKM or {}
 
 NKM.Name = "NikNaks Map Runtime"
 NKM.Version = 1 -- File format version
-NKM.RuntimeVersion = "0.9.9-r5-gshader-bridge"
+NKM.RuntimeVersion = "0.9.9-r6-pixel-lighting"
 NKM.FormatMagic = "NKM"
 NKM.MaxMapBytes = 2 * 1024 * 1024
 NKM.MaxVertices = 250000

@@ -26,3 +26,14 @@ Vertex lighting is optional in NKM format v1. Legacy maps without it still valid
 ## Offline validation
 
 `tests/bsp_import.lua` builds a synthetic 17x17 LDR lightmap, emits 289 source sample-position records, runs the real importer, and verifies the RGBExp32-to-vertex conversion and propagation to chunk render vertices.
+
+
+## Deferred per-pixel lighting (GShader)
+
+When the updated `nkm_deferred_lighting_ps30.vcs` is installed and `nkm_gshader_pixel_lighting 1` is set before the map's chunks load, NKM ambient and directional light are evaluated per pixel from GShader's reconstructed world-position and world-normal buffers. In this mode the client does not multiply NKM vertex colors by the server-side `nkmLighting` bake. The existing vertex bake remains the compatibility path by default.
+
+All NKM point lights are uploaded to the GShader LUT in pixel mode and evaluated per pixel in a separate full-screen pass. This pass is not stencil-limited, so NKM point lights can affect NKM geometry, opaque players and opaque props. The NKM ambient/directional/AO pass remains restricted to the visible NKM stencil mask, so NKM AO does not darken the entire host BSP map.
+
+Directional and point shadows are screen-space approximations using the GShader world-position buffer. Off-screen occluders and transparent materials are not represented by the opaque GBuffer. Imported BSP displacement `lit` mode uses its albedo path when pixel lighting is enabled; its original LDR per-vertex bake remains available in compatibility mode.
+
+**Compilation requirement:** the updated HLSL must be compiled into `shaders/fxc/nkm_deferred_lighting_ps30.vcs` with the Source/GMod shader toolchain. The checked-in VCS is the previous compiled version and does not contain the new ambient/directional c2-c10 shader constants. Do not set `nkm_gshader_pixel_lighting 1` until that VCS has been rebuilt. The convar defaults to `0` to preserve the existing vertex-light fallback.
