@@ -66,6 +66,7 @@ NKM.GShaderGlobalPointPassCount = NKM.GShaderGlobalPointPassCount or 0
 NKM.GShaderScenePassCount = NKM.GShaderScenePassCount or 0
 NKM.GShaderEntityPassCount = NKM.GShaderEntityPassCount or 0
 NKM.GShaderEntityLastError = nil
+NKM.GShaderSourceNormalMaskReady = false
 NKM.GShaderDepthPassCount = NKM.GShaderDepthPassCount or 0
 NKM.GShaderDepthMeshDrawCount = NKM.GShaderDepthMeshDrawCount or 0
 NKM.GShaderLastDepthPassAt = nil
@@ -1908,6 +1909,7 @@ end
 
 local function buildNKMReconstructionBuffers(viewSetup)
     NKM.GShaderNKMBufferReady = false
+    NKM.GShaderSourceNormalMaskReady = false
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() or not viewSetup then return false end
     if not shouldRunGShaderLighting() then return false end
     if not ensureNKMGShaderBufferResources() then return false end
@@ -1983,6 +1985,7 @@ local function buildNKMReconstructionBuffers(viewSetup)
     end
 
     local sourceMaskOK, sourceMaskError = drawNKMSourceNormalMask()
+    NKM.GShaderSourceNormalMaskReady = sourceMaskOK == true
     if sourceMaskOK then
         NKM.GShaderEntityLastError = nil
     else
@@ -2238,10 +2241,11 @@ local function drawNKMSceneLighting(viewSetup)
         -- Pass 1: Source pixels. The separate normal target contains GShader's
         -- per-pixel reconstructed normal in RG and depth ownership in B.
         -- No NKM mesh rasterization, depth write, or stencil mutation occurs here.
-        NKM.GShaderEntityLastError = nil
         if entityLightingEnabled then
-            if not sourceWorldPosition or not NKM_GShaderSourceNormalRT then
-                NKM.GShaderEntityLastError = "Source receiver position/normal-mask buffers are unavailable"
+            if not sourceWorldPosition or not NKM_GShaderSourceNormalRT
+                or not NKM.GShaderSourceNormalMaskReady then
+                NKM.GShaderEntityLastError = NKM.GShaderEntityLastError
+                    or "Source receiver normal-mask buffer was not built for this frame"
             else
                 bindLightingPass(sourceWorldPosition, NKM_GShaderSourceNormalRT)
                 render.SetMaterial(material)
@@ -2292,6 +2296,7 @@ function NKM.ClearClientMap()
     NKM.RenderMeshes = {}
     NKM.TraceMap = nil
     NKM.GShaderNKMBufferReady = false
+    NKM.GShaderSourceNormalMaskReady = false
 end
 
 function NKM.UnloadClientChunk(chunk)
