@@ -96,6 +96,13 @@ local GSHADER_MASK_MATERIAL = CreateMaterial("nkm_gshader_mask_r5", "UnlitGeneri
     ["$nocull"] = "0"
 })
 
+local GSHADER_NKM_VERTEX_NORMAL_MATERIAL = CreateMaterial("nkm_gshader_vertex_normal_debug", "UnlitGeneric", {
+    ["$basetexture"] = "color/white",
+    ["$vertexcolor"] = "1",
+    ["$vertexalpha"] = "1",
+    ["$nocull"] = "0"
+})
+
 local function isFiniteNumber(value)
     return isnumber(value) and value == value and value ~= math.huge and value ~= -math.huge
 end
@@ -108,6 +115,9 @@ local function destroyMeshList(meshList)
         if entry.blendMesh and entry.blendMesh:IsValid() then
             entry.blendMesh:Destroy()
         end
+        if entry.normalDebugMesh and entry.normalDebugMesh:IsValid() then
+            entry.normalDebugMesh:Destroy()
+        end
     end
 end
 
@@ -118,6 +128,34 @@ local function getVertexColor(value)
         math.Clamp(math.floor(value[2] or 255), 0, 255),
         math.Clamp(math.floor(value[3] or 255), 0, 255),
         math.Clamp(math.floor(value[4] or 255), 0, 255)
+    )
+end
+
+local function encodeGShaderOctahedralNormal(normal)
+    local x, y, z = normal.x, normal.y, normal.z
+    local length = math.sqrt(x * x + y * y + z * z)
+    if length < 0.000001 then
+        return Color(128, 128, 255, 255)
+    end
+
+    x, y, z = x / length, y / length, z / length
+    local denominator = math.abs(x) + math.abs(y) + math.abs(z)
+    if denominator < 0.000001 then
+        return Color(128, 128, 255, 255)
+    end
+
+    x, y, z = x / denominator, y / denominator, z / denominator
+    if z < 0 then
+        local oldX, oldY = x, y
+        x = (1 - math.abs(oldY)) * (oldX >= 0 and 1 or -1)
+        y = (1 - math.abs(oldX)) * (oldY >= 0 and 1 or -1)
+    end
+
+    return Color(
+        math.Clamp(math.floor((x * 0.5 + 0.5) * 255 + 0.5), 0, 255),
+        math.Clamp(math.floor((y * 0.5 + 0.5) * 255 + 0.5), 0, 255),
+        128,
+        255
     )
 end
 
@@ -247,6 +285,7 @@ end
 
 local function buildChunkRenderMeshes(meshGroups, chunkID)
     local built = {}
+    local buildNormalDebugMeshes = NKM.GShaderNKMBufferDebug == true
 
     for groupIndex, group in ipairs(meshGroups or {}) do
         local source = group.vertices or {}
@@ -299,12 +338,55 @@ local function buildChunkRenderMeshes(meshGroups, chunkID)
                 end
             end
 
+            local normalDebugBatch = nil
+            if buildNormalDebugMeshes then
+                normalDebugBatch = {}
+                for triangleStart = 1, #batch, 3 do
+                    local a, b, c = batch[triangleStart], batch[triangleStart + 1], batch[triangleStart + 2]
+                    local faceNormal = (b.pos - a.pos):Cross(c.pos - a.pos)
+                    if faceNormal:LengthSqr() < 0.000001 then
+                        faceNormal = Vector(0, 0, 1)
+                    else
+                        faceNormal:Normalize()
+                    end
+
+                    for vertexOffset = 0, 2 do
+                        local vertexIndex = triangleStart + vertexOffset
+                        local sourceVertex = source[sourceIndex + vertexIndex - 1]
+                        local sourceNormal = sourceVertex and sourceVertex.n
+                        local normal = faceNormal
+                        if istable(sourceNormal)
+                            and isFiniteNumber(sourceNormal[1])
+                            and isFiniteNumber(sourceNormal[2])
+                            and isFiniteNumber(sourceNormal[3]) then
+                            local candidate = Vector(sourceNormal[1], sourceNormal[2], sourceNormal[3])
+                            if candidate:LengthSqr() > 0.000001 then
+                                candidate:Normalize()
+                                normal = candidate
+                            end
+                        end
+
+                        normalDebugBatch[#normalDebugBatch + 1] = {
+                            pos = batch[vertexIndex].pos,
+                            normal = normal,
+                            u = 0,
+                            v = 0,
+                            color = encodeGShaderOctahedralNormal(normal)
+                        }
+                    end
+                end
+            end
+
             -- Source IMesh culling expects the opposite triangle order to the
             -- editor's outward-facing face order. Keep this flip for ordinary NKM
             -- brush meshes; do not apply it to imported BSP displacements.
             if flipBrushWinding then
                 for i = 1, #batch - 2, 3 do
                     batch[i + 1], batch[i + 2] = batch[i + 2], batch[i + 1]
+                    if normalDebugBatch then
+                        normalDebugBatch[i + 1], normalDebugBatch[i + 2] =
+                            normalDebugBatch[i + 2], normalDebugBatch[i + 1]
+                    end
                 end
             end
 
@@ -326,11 +408,32 @@ local function buildChunkRenderMeshes(meshGroups, chunkID)
                 return nil, "BuildFromTriangles failed in chunk " .. tostring(chunkID) .. ": " .. tostring(err)
             end
 
+            local normalDebugMesh = nil
+            if normalDebugBatch then
+                normalDebugMesh = Mesh()
+                if not normalDebugMesh then
+                    if imesh:IsValid() then imesh:Destroy() end
+                    destroyMeshList(built)
+                    return nil, "normal debug Mesh() returned nil for chunk " .. tostring(chunkID)
+                end
+                local normalOK, normalError = pcall(function()
+                    normalDebugMesh:BuildFromTriangles(normalDebugBatch)
+                end)
+                if not normalOK then
+                    if imesh:IsValid() then imesh:Destroy() end
+                    if normalDebugMesh:IsValid() then normalDebugMesh:Destroy() end
+                    destroyMeshList(built)
+                    return nil, "normal debug BuildFromTriangles failed in chunk "
+                        .. tostring(chunkID) .. ": " .. tostring(normalError)
+                end
+            end
+
             local blendMesh = nil
             if blendBatch then
                 blendMesh = Mesh()
                 if not blendMesh then
                     if imesh:IsValid() then imesh:Destroy() end
+                    if normalDebugMesh and normalDebugMesh:IsValid() then normalDebugMesh:Destroy() end
                     destroyMeshList(built)
                     return nil, "blend Mesh() returned nil for chunk " .. tostring(chunkID)
                 end
@@ -340,6 +443,7 @@ local function buildChunkRenderMeshes(meshGroups, chunkID)
                 if not blendOK then
                     if imesh:IsValid() then imesh:Destroy() end
                     if blendMesh:IsValid() then blendMesh:Destroy() end
+                    if normalDebugMesh and normalDebugMesh:IsValid() then normalDebugMesh:Destroy() end
                     destroyMeshList(built)
                     return nil, "blend BuildFromTriangles failed in chunk " .. tostring(chunkID) .. ": " .. tostring(blendError)
                 end
@@ -348,6 +452,7 @@ local function buildChunkRenderMeshes(meshGroups, chunkID)
             built[#built + 1] = {
                 mesh = imesh,
                 blendMesh = blendMesh,
+                normalDebugMesh = normalDebugMesh,
                 material = material,
                 albedoMaterial = bspBundle and bspBundle.albedo or nil,
                 blendMaterial = bspBundle and bspBundle.blend or nil,
