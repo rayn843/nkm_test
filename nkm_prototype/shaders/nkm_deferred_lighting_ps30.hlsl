@@ -26,9 +26,7 @@ const float4 NKMDir3 : register(c9);
 const float4 NKMDirColor3 : register(c10);
 // GShader sets this through IMaterial:SetMatrix("$viewprojmat", ...).
 const float4x4 ViewProj : register(c11);
-// x=0 shades NKM receivers (B is the receiver-visibility mask);
-// x=1 shades the visible GShader Source scene (B is tangent data, not a mask).
-const float4 LightingPassParams : register(c15);
+
 
 static const float NKM_SKY_DEPTH = 0.00025;
 static const float NKM_MAX_LIGHTS = 32.0;
@@ -234,9 +232,8 @@ float4 main(PS_INPUT input) : COLOR0
 
     float3 worldPosition = SafeUnpackWorldPos(worldPositionDepth.rgb);
     float4 packedNormal = tex2Dlod(NormalBuffer, float4(uv, 0, 0));
-    // In NKM mode, blue stores the receiver-visibility mask. In Source mode,
-    // blue stores GShader's tangent encoding and must not be treated as a mask.
-    if (LightingPassParams.x < 0.5 && packedNormal.b < 0.5)
+    // Both receiver textures store their per-pixel visibility mask in blue.
+    if (packedNormal.b < 0.5)
         discard;
     float3 worldNormal = Decode(packedNormal.xy);
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
