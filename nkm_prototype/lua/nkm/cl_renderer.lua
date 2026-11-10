@@ -1551,6 +1551,12 @@ local function drawNKMDecodedWorldPositionDebug()
     local pushedTarget = false
     local cameraStarted = false
     local ok, err = pcall(function()
+        -- The debug pixel shader samples by VPOS, so c4 must contain the
+        -- inverse dimensions of the source world-position texture.
+        local sourceWidth = math.max(NKM_GShaderWorldPosRT:Width(), 1)
+        local sourceHeight = math.max(NKM_GShaderWorldPosRT:Height(), 1)
+        NKM_GShaderWorldPosDebugMaterial:SetFloat("$c4_x", 1 / sourceWidth)
+        NKM_GShaderWorldPosDebugMaterial:SetFloat("$c4_y", 1 / sourceHeight)
         NKM_GShaderWorldPosDebugMaterial:SetTexture("$basetexture", NKM_GShaderWorldPosRT)
         render.PushRenderTarget(NKM_GShaderDecodedWorldPosRT)
         pushedTarget = true
