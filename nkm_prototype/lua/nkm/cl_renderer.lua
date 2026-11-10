@@ -1007,6 +1007,8 @@ local NKM_GShaderWorldPosSampler2RT
 local NKM_GShaderWorldPosSampler2Material
 local NKM_GShaderWorldPosNormal4TapRT
 local NKM_GShaderWorldPosNormal4TapMaterial
+local NKM_GShaderPointLightDebugRT
+local NKM_GShaderPointLightDebugMaterial
 local NKM_GShaderDecodedNormalRT
 local NKM_GShaderVertexNormalRT
 local NKM_GShaderDecodedVertexNormalRT
@@ -1073,6 +1075,39 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
         if not NKM_GShaderWorldPosNormal4TapRT then
             NKM.GShaderNKMBufferDebugNormal4TapError =
                 tostring(target or "4-tap world-normal debug RT creation failed")
+        end
+    end
+
+    local pointLightDebugReady = NKM_GShaderPointLightDebugRT
+        and NKM_GShaderPointLightDebugRT:Width() == width
+        and NKM_GShaderPointLightDebugRT:Height() == height
+    if not pointLightDebugReady then
+        local targetOK, target = pcall(GetRenderTargetEx,
+            "_rt_NKM_PointLightContribution_Debug", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA8888)
+        NKM_GShaderPointLightDebugRT = targetOK and target or nil
+        if not NKM_GShaderPointLightDebugRT then
+            NKM.GShaderNKMBufferDebugPointLightError =
+                tostring(target or "point-light debug RT creation failed")
+        end
+    end
+
+    if not NKM_GShaderPointLightDebugMaterial then
+        local materialOK, material = pcall(Material, "pp/nkm_point_light_debug")
+        if not materialOK or not material then
+            NKM_GShaderPointLightDebugMaterial = nil
+            NKM.GShaderNKMBufferDebugPointLightError =
+                tostring(material or "point-light debug material is unavailable")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderPointLightDebugMaterial = nil
+                NKM.GShaderNKMBufferDebugPointLightError =
+                    "nkm_point_light_debug_ps30 is not compiled/available"
+            else
+                NKM_GShaderPointLightDebugMaterial = material
+                NKM.GShaderNKMBufferDebugPointLightError = nil
+            end
         end
     end
 
@@ -1334,6 +1369,13 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     elseif not NKM.GShaderNKMBufferDebugNormal4TapError then
         NKM.GShaderNKMBufferDebugNormal4TapError =
             "4-tap world-normal debug resources are incomplete"
+    end
+
+    if NKM_GShaderPointLightDebugRT and NKM_GShaderPointLightDebugMaterial then
+        NKM.GShaderNKMBufferDebugPointLightError = nil
+    elseif not NKM.GShaderNKMBufferDebugPointLightError then
+        NKM.GShaderNKMBufferDebugPointLightError =
+            "point-light debug resources are incomplete"
     end
 
     local vertexNormalDebugReady = NKM_GShaderVertexNormalRT ~= nil
@@ -1700,6 +1742,39 @@ local function drawNKMWorldPosSampler2Debug()
     return true
 end
 
+local function drawNKMPointLightContributionDebug()
+    if not NKM_GShaderPointLightDebugMaterial or not NKM_GShaderPointLightDebugRT
+        or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then
+        return false, "point-light debug resources are unavailable"
+    end
+    if not updateGShaderDynamicLightLUT() or not NKM.GShaderDynamicLightLUT then
+        return false, NKM.GShaderLUTLastError or "dynamic-light LUT is unavailable"
+    end
+
+    local pushedTarget = false
+    local cameraStarted = false
+    local ok, err = pcall(function()
+        NKM_GShaderPointLightDebugMaterial:SetTexture("$basetexture", NKM_GShaderWorldPosRT)
+        NKM_GShaderPointLightDebugMaterial:SetTexture("$texture1", NKM_GShaderNormalRT)
+        NKM_GShaderPointLightDebugMaterial:SetTexture("$texture2", NKM.GShaderDynamicLightLUT)
+        NKM_GShaderPointLightDebugMaterial:SetFloat("$c0_x", #((NKM.ClientDynamicLights) or {}))
+        render.PushRenderTarget(NKM_GShaderPointLightDebugRT)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(NKM_GShaderPointLightDebugMaterial)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
+end
+
 local function drawNKMWorldPosNormal4TapDebug()
     if not NKM_GShaderWorldPosNormal4TapMaterial or not NKM_GShaderWorldPosNormal4TapRT
         or not NKM_GShaderWorldPosRT then
@@ -1825,6 +1900,15 @@ local function buildNKMReconstructionBuffers(viewSetup)
         return false
     end
 
+    if NKM.GShaderNKMBufferDebug then
+        local pointDebugOK, pointDebugError = drawNKMPointLightContributionDebug()
+        if pointDebugOK then
+            NKM.GShaderNKMBufferDebugPointLightError = nil
+        else
+            NKM.GShaderNKMBufferDebugPointLightError = tostring(pointDebugError)
+        end
+    end
+
     -- Decode the improved buffer for inspection and build a second normal map
     -- with GShader's simpler 4-tap algorithm. Comparing both isolates errors in
     -- the improved neighbour-selection logic from errors in NKM world positions.
@@ -1884,7 +1968,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if not NKM.GShaderNKMBufferDebug then return end
     if not NKM_GShaderRawDepthRT or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then return end
 
-    local width = math.floor((ScrW() - 88) / 9)
+    local width = math.floor((ScrW() - 96) / 10)
     local height = math.floor(width * ScrH() / math.max(ScrW(), 1))
     local y = ScrH() - height - 34
     local gap = 8
@@ -1901,6 +1985,7 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     local x7 = x6 + width + gap
     local x8 = x7 + width + gap
     local x9 = x8 + width + gap
+    local x10 = x9 + width + gap
     if NKM_GShaderDecodedNormalRT then
         render.DrawTextureToScreenRect(NKM_GShaderDecodedNormalRT, x4, y, width, height)
     end
@@ -1918,6 +2003,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     end
     if NKM_GShaderWorldPosNormal4TapRT then
         render.DrawTextureToScreenRect(NKM_GShaderWorldPosNormal4TapRT, x9, y, width, height)
+    end
+    if NKM_GShaderPointLightDebugRT then
+        render.DrawTextureToScreenRect(NKM_GShaderPointLightDebugRT, x10, y, width, height)
     end
     draw.SimpleText("NKM raw depth", "DermaDefault", x1, y + height + 4, color_white)
     draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
@@ -1939,6 +2027,9 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     end
     if NKM_GShaderWorldPosNormal4TapRT then
         draw.SimpleText("NKM WP 4-tap normal XYZ", "DermaDefault", x9, y + height + 4, color_white)
+    end
+    if NKM_GShaderPointLightDebugRT then
+        draw.SimpleText("NKM point-light contribution", "DermaDefault", x10, y + height + 4, color_white)
     end
     if NKM.GShaderNKMBufferDebugLastError then
         draw.SimpleText("Improved decode debug: " .. tostring(NKM.GShaderNKMBufferDebugLastError),
@@ -1963,6 +2054,10 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM.GShaderNKMBufferDebugNormal4TapError then
         draw.SimpleText("WP 4-tap normal debug: " .. tostring(NKM.GShaderNKMBufferDebugNormal4TapError),
             "DermaDefault", 8, y - 108, Color(255, 100, 100))
+    end
+    if NKM.GShaderNKMBufferDebugPointLightError then
+        draw.SimpleText("Point-light debug: " .. tostring(NKM.GShaderNKMBufferDebugPointLightError),
+            "DermaDefault", 8, y - 126, Color(255, 100, 100))
     end
 end)
 
@@ -1992,6 +2087,7 @@ local function drawNKMSceneLighting(viewSetup)
         end
 
         local setters = {
+            { material.SetTexture, "$texture2", NKM.GShaderDynamicLightLUT },
             { material.SetTexture, "$texture4", NKM_GShaderWorldPosRT },
             { material.SetTexture, "$texture5", NKM_GShaderNormalRT },
             { material.SetMatrix, "$viewprojmat", viewProjection },
@@ -2824,6 +2920,7 @@ concommand.Add("nkm_gshader_status", function()
             .. "; WP debug shader=" .. tostring(NKM_GShaderWorldPosDebugMaterial ~= nil)
             .. "; WP sampler2 shader=" .. tostring(NKM_GShaderWorldPosSampler2Material ~= nil)
             .. "; WP 4-tap normal shader=" .. tostring(NKM_GShaderWorldPosNormal4TapMaterial ~= nil)
+            .. "; point-light debug shader=" .. tostring(NKM_GShaderPointLightDebugMaterial ~= nil)
             .. "; mesh normal meshes=" .. tostring(NKM.GShaderNKMBufferDebugVertexMeshes or 0)
             .. "; mesh normal decoded=" .. tostring(NKM_GShaderDecodedVertexNormalRT ~= nil)
             .. "; 4tap target=" .. tostring(NKM_GShaderNormal4TapRT ~= nil)
@@ -2847,6 +2944,10 @@ concommand.Add("nkm_gshader_status", function()
         if NKM.GShaderNKMBufferDebugNormal4TapError then
             print("[NKM] NKM 4-tap world-normal debug error: "
                 .. tostring(NKM.GShaderNKMBufferDebugNormal4TapError))
+        end
+        if NKM.GShaderNKMBufferDebugPointLightError then
+            print("[NKM] NKM point-light debug error: "
+                .. tostring(NKM.GShaderNKMBufferDebugPointLightError))
         end
     end
     print("[NKM] Engine SSAO depth callbacks: " .. tostring(NKM.GShaderDepthPassCount or 0)
