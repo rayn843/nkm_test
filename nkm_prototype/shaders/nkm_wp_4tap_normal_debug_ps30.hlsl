@@ -1,6 +1,4 @@
 sampler WorldPosInverseBuffer : register(s2);
-float2 TexBaseSize : register(c4);
-
 struct PS_INPUT {
     float2 P : VPOS;
     float2 uv : TEXCOORD0;
@@ -23,11 +21,16 @@ float4 main(PS_INPUT frag) : COLOR0 {
         discard;
     }
 
-    // Sample one source texel away in each screen-space direction.
-    float2 uvLeft  = uv + float2(-1.0,  0.0) * TexBaseSize;
-    float2 uvRight = uv + float2( 1.0,  0.0) * TexBaseSize;
-    float2 uvDown  = uv + float2( 0.0, -1.0) * TexBaseSize;
-    float2 uvUp    = uv + float2( 0.0,  1.0) * TexBaseSize;
+    // Derive the actual one-pixel UV step from the interpolated screen quad.
+    // This avoids relying on c4/TexBaseSize, which can be overridden by
+    // screenspace_general and otherwise produce large shifted copies.
+    float2 pixelStepX = ddx(uv);
+    float2 pixelStepY = ddy(uv);
+
+    float2 uvLeft  = uv - pixelStepX;
+    float2 uvRight = uv + pixelStepX;
+    float2 uvDown  = uv - pixelStepY;
+    float2 uvUp    = uv + pixelStepY;
 
     float3 positionLeft  = getWorldPosition(uvLeft);
     float3 positionRight = getWorldPosition(uvRight);
