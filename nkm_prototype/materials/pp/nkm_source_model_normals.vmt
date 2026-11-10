@@ -3,15 +3,12 @@
     "$pixshader" "nkm_source_model_normals_ps30"
     "$vertexshader" "nkm_source_model_normals_vs30"
     "$basetexture" "_rt_WPDepth"
+    "$model" "1"
+    "$cull" "1"
+    "$depthtest" "1"
+    "$softwareskin" "1"
     "$vertexnormal" "1"
-    "$vertextransform" "0"
     "$writealpha" "1"
-    "$writedepth" "1"
     "$linearwrite" "1"
     "$ignorez" "0"
-
-    "<dx90>"
-    {
-        "$no_draw" "1"
-    }
 }
