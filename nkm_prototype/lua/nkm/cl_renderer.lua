@@ -73,6 +73,7 @@ NKM.GShaderNKMBufferLastMeshes = 0
 NKM.GShaderNKMBufferLastAt = nil
 NKM.GShaderNKMBufferReady = false
 NKM.GShaderNKMBufferLastError = nil
+NKM.GShaderNKMBufferDebug = false
 NKM.GShaderPixelLighting = false
 local NKM_GShaderPixelLightingConVar = CreateClientConVar(
     "nkm_gshader_pixel_lighting", "0", true, false,
@@ -1090,6 +1091,7 @@ end
 local function buildNKMReconstructionBuffers(viewSetup)
     NKM.GShaderNKMBufferReady = false
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() or not viewSetup then return false end
+    if not shouldRunGShaderLighting() then return false end
     if not ensureNKMGShaderBufferResources() then return false end
 
     local rawOK, rawError, drawnMeshes = drawNKMRawDepth(viewSetup)
@@ -1131,6 +1133,26 @@ local function buildNKMReconstructionBuffers(viewSetup)
 end
 
 hook.Add("PostDrawReconstructionPreEffects", "NKM.GShaderNKMBuffer", buildNKMReconstructionBuffers)
+
+hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
+    if not NKM.GShaderNKMBufferDebug then return end
+    if not NKM_GShaderRawDepthRT or not NKM_GShaderWorldPosRT or not NKM_GShaderNormalRT then return end
+
+    local width = math.floor(ScrW() / 5)
+    local height = math.floor(width * ScrH() / math.max(ScrW(), 1))
+    local y = ScrH() - height - 34
+    local gap = 8
+    local x1 = 8
+    local x2 = x1 + width + gap
+    local x3 = x2 + width + gap
+
+    render.DrawTextureToScreenRect(NKM_GShaderRawDepthRT, x1, y, width, height)
+    render.DrawTextureToScreenRect(NKM_GShaderWorldPosRT, x2, y, width, height)
+    render.DrawTextureToScreenRect(NKM_GShaderNormalRT, x3, y, width, height)
+    draw.SimpleText("NKM raw depth", "DermaDefault", x1, y + height + 4, color_white)
+    draw.SimpleText("NKM world position", "DermaDefault", x2, y + height + 4, color_white)
+    draw.SimpleText("NKM normals", "DermaDefault", x3, y + height + 4, color_white)
+end)
 
 local function drawNKMSceneLighting(viewSetup)
     if not NKM.GShaderBridgeEnabled or not hasGShaderAPI() then return false end
@@ -1249,6 +1271,7 @@ function NKM.ClearClientMap()
     NKM.LoadedClientChunkCount = 0
     NKM.RenderMeshes = {}
     NKM.TraceMap = nil
+    NKM.GShaderNKMBufferReady = false
 end
 
 function NKM.UnloadClientChunk(chunk)
@@ -1998,6 +2021,19 @@ concommand.Add("nkm_gshader_status", function()
     print("[NKM] LUT uploaded: " .. tostring(NKM.GShaderLUTGeneration == NKM.ClientGeneration))
     if NKM.GShaderLUTLastError then print("[NKM] LUT error: " .. tostring(NKM.GShaderLUTLastError)) end
     if NKM.GShaderLastError then print("[NKM] Last error: " .. tostring(NKM.GShaderLastError)) end
+end)
+
+concommand.Add("nkm_gshader_debug_buffers", function(_, _, args)
+    local value = args and args[1]
+    if value == "1" then
+        NKM.GShaderNKMBufferDebug = true
+    elseif value == "0" then
+        NKM.GShaderNKMBufferDebug = false
+    elseif value ~= nil then
+        print("[NKM] Usage: nkm_gshader_debug_buffers [0|1]")
+        return
+    end
+    print("[NKM] NKM GBuffer debug: " .. tostring(NKM.GShaderNKMBufferDebug == true))
 end)
 
 concommand.Add("nkm_gshader_debug_mask", function(_, _, args)
