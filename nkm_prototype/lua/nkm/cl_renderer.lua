@@ -900,18 +900,70 @@ local NKM_GShaderWorldPosMaterial
 local NKM_GShaderNormalMaterial
 local NKM_GShaderNormalDecodeMaterial
 
+local function ensureNKMNormalDecodeDebugResources(width, height, flags)
+    if not NKM.GShaderNKMBufferDebug then
+        NKM.GShaderNKMBufferDebugLastError = nil
+        return true
+    end
+
+    local decodedReady = NKM_GShaderDecodedNormalRT
+        and NKM_GShaderDecodedNormalRT:Width() == width
+        and NKM_GShaderDecodedNormalRT:Height() == height
+    if not decodedReady then
+        local decodedOK, decodedNormals = pcall(GetRenderTargetEx,
+            "_rt_NKM_DecodedNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+            MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
+        if decodedOK and decodedNormals then
+            NKM_GShaderDecodedNormalRT = decodedNormals
+        else
+            NKM_GShaderDecodedNormalRT = nil
+            NKM.GShaderNKMBufferDebugLastError = tostring(decodedNormals or "decoded normal RT creation failed")
+        end
+    end
+
+    if not NKM_GShaderNormalDecodeMaterial then
+        local materialOK, material = pcall(CreateMaterial, "nkm_gshader_normal_decode_debug",
+            "screenspace_general", {
+                ["$pixshader"] = "wn_tangetns_decode_ps30",
+                ["$vertexshader"] = "pp_vs30",
+                ["$basetexture"] = "_rt_NKM_Normals",
+                ["$no_fullbright"] = "1",
+                ["$ignorez"] = "1",
+                ["$VERTEXTRANSFORM"] = "1",
+                ["$WRITEALPHA"] = "1",
+                ["$copyalpha"] = "1",
+                ["$vertexalpha"] = "1"
+            })
+        if not materialOK or not material then
+            NKM_GShaderNormalDecodeMaterial = nil
+            NKM.GShaderNKMBufferDebugLastError = tostring(material or "normal decode debug material failed")
+        else
+            local errorOK, isError = pcall(material.IsError, material)
+            if not errorOK or isError then
+                NKM_GShaderNormalDecodeMaterial = nil
+                NKM.GShaderNKMBufferDebugLastError = "GShader normal decode shader is unavailable"
+            else
+                NKM_GShaderNormalDecodeMaterial = material
+            end
+        end
+    end
+
+    return NKM_GShaderDecodedNormalRT ~= nil and NKM_GShaderNormalDecodeMaterial ~= nil
+end
+
 local function ensureNKMGShaderBufferResources()
     local width, height = ScrW(), ScrH()
     local ready = NKM_GShaderRawDepthRT and NKM_GShaderWorldPosRT and NKM_GShaderNormalRT
         and NKM_GShaderRawDepthRT:Width() == width and NKM_GShaderRawDepthRT:Height() == height
         and NKM_GShaderWorldPosRT:Width() == width and NKM_GShaderWorldPosRT:Height() == height
         and NKM_GShaderNormalRT:Width() == width and NKM_GShaderNormalRT:Height() == height
-    local debugReady = not NKM.GShaderNKMBufferDebug
-        or (NKM_GShaderDecodedNormalRT and NKM_GShaderDecodedNormalRT:Width() == width
-            and NKM_GShaderDecodedNormalRT:Height() == height and NKM_GShaderNormalDecodeMaterial)
-    if ready and NKM_GShaderWorldPosMaterial and NKM_GShaderNormalMaterial and debugReady then return true end
-
+    local coreMaterialsReady = NKM_GShaderWorldPosMaterial and NKM_GShaderNormalMaterial
     local flags = bit.bor(1, 4, 8, 256, 512, 32768, 8388608)
+    if ready and coreMaterialsReady then
+        ensureNKMNormalDecodeDebugResources(width, height, flags)
+        return true
+    end
+
     local okRaw, rawDepth = pcall(GetRenderTargetEx,
         "_rt_NKM_RawDepth", width, height, RT_SIZE_FULL_FRAME_BUFFER,
         MATERIAL_RT_DEPTH_SEPARATE, flags, 0, IMAGE_FORMAT_RGBA32323232F)
@@ -934,23 +986,6 @@ local function ensureNKMGShaderBufferResources()
     NKM_GShaderRawDepthRT = rawDepth
     NKM_GShaderWorldPosRT = worldPos
     NKM_GShaderNormalRT = normals
-
-    if NKM.GShaderNKMBufferDebug then
-        local decodedReady = NKM_GShaderDecodedNormalRT
-            and NKM_GShaderDecodedNormalRT:Width() == width
-            and NKM_GShaderDecodedNormalRT:Height() == height
-        if not decodedReady then
-            local decodedOK, decodedNormals = pcall(GetRenderTargetEx,
-                "_rt_NKM_DecodedNormals", width, height, RT_SIZE_FULL_FRAME_BUFFER,
-                MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
-            if decodedOK and decodedNormals then
-                NKM_GShaderDecodedNormalRT = decodedNormals
-            else
-                NKM_GShaderDecodedNormalRT = nil
-                NKM.GShaderNKMBufferDebugLastError = tostring(decodedNormals or "decoded normal RT creation failed")
-            end
-        end
-    end
 
     if not NKM_GShaderWorldPosMaterial then
         local materialOK, material = pcall(CreateMaterial, "nkm_gshader_worldpos_reconstruction",
@@ -1012,33 +1047,7 @@ local function ensureNKMGShaderBufferResources()
         NKM_GShaderNormalMaterial = material
     end
 
-    if not NKM_GShaderNormalDecodeMaterial then
-        local materialOK, material = pcall(CreateMaterial, "nkm_gshader_normal_decode_debug",
-            "screenspace_general", {
-                ["$pixshader"] = "wn_tangetns_decode_ps30",
-                ["$vertexshader"] = "pp_vs30",
-                ["$basetexture"] = "_rt_NKM_Normals",
-                ["$no_fullbright"] = "1",
-                ["$ignorez"] = "1",
-                ["$VERTEXTRANSFORM"] = "1",
-                ["$WRITEALPHA"] = "1",
-                ["$copyalpha"] = "1",
-                ["$vertexalpha"] = "1"
-            })
-        if not materialOK or not material then
-            NKM_GShaderNormalDecodeMaterial = nil
-            NKM.GShaderNKMBufferDebugLastError = tostring(material or "normal decode debug material failed")
-        else
-            local errorOK, isError = pcall(material.IsError, material)
-            if not errorOK or isError then
-                NKM_GShaderNormalDecodeMaterial = nil
-                NKM.GShaderNKMBufferDebugLastError = "GShader normal decode shader is unavailable"
-            else
-                NKM_GShaderNormalDecodeMaterial = material
-            end
-        end
-    end
-
+    ensureNKMNormalDecodeDebugResources(width, height, flags)
     return true
 end
 
