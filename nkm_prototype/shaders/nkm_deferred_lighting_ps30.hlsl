@@ -231,8 +231,13 @@ float4 main(PS_INPUT input) : COLOR0
         discard;
 
     float3 worldPosition = SafeUnpackWorldPos(worldPositionDepth.rgb);
-    float2 packedNormal = tex2Dlod(NKMNormalBuffer, float4(uv, 0, 0)).xy;
-    float3 worldNormal = Decode(packedNormal);
+    float4 packedNormal = tex2Dlod(NKMNormalBuffer, float4(uv, 0, 0));
+    // The normal reconstruction pass marks NKM pixels hidden by a nearer
+    // Source surface in the blue channel. Do not apply NKM lighting to that
+    // foreground entity/player pixel.
+    if (packedNormal.b < 0.5)
+        discard;
+    float3 worldNormal = Decode(packedNormal.xy);
     float4 sceneColor = tex2Dlod(SceneBuffer, float4(uv, 0, 0));
 
     float ao = CalculateLocalAO(uv, worldPosition, worldNormal);
