@@ -1813,6 +1813,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         NKM.GShaderSourceModelNormalLastError = nil
         NKM.GShaderSourceModelNormalDebugCameraOrigin = nil
         NKM.GShaderSourceModelNormalDebugCameraAngles = nil
+        NKM.GShaderSourceModelNormalDebugEntityInfo = nil
         NKM.GShaderSourceModelNormalDebugUpdatedAt = nil
         return true, nil, 0
     end
@@ -1832,6 +1833,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     NKM.GShaderSourceModelNormalDebugUpdatedAt = RealTime()
     local pushedTarget, cameraStarted = false, false
     local drawnModels, failedModels = 0, 0
+    local nearestEntity, nearestDistanceSqr = nil, nil
     local width, height = ScrW(), ScrH()
 
     local ok, err = pcall(function()
@@ -1870,6 +1872,12 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
                 end)
                 if drawOK then
                     drawnModels = drawnModels + 1
+                    local delta = entity:GetPos() - viewSetup.origin
+                    local distanceSqr = delta:LengthSqr()
+                    if not nearestDistanceSqr or distanceSqr < nearestDistanceSqr then
+                        nearestEntity = entity
+                        nearestDistanceSqr = distanceSqr
+                    end
                 else
                     failedModels = failedModels + 1
                 end
@@ -1894,6 +1902,21 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     if pushedTarget then pcall(render.PopRenderTarget) end
 
     NKM.GShaderSourceModelNormalDraws = drawnModels
+    NKM.GShaderSourceModelNormalDebugEntityInfo = nil
+    if IsValid(nearestEntity) then
+        local infoOK, info = pcall(function()
+            local position = nearestEntity:GetPos()
+            local angles = nearestEntity:GetAngles()
+            return {
+                index = nearestEntity:EntIndex(),
+                class = nearestEntity:GetClass(),
+                model = nearestEntity:GetModel() or "",
+                position = Vector(position.x, position.y, position.z),
+                angles = Angle(angles.p, angles.y, angles.r)
+            }
+        end)
+        if infoOK then NKM.GShaderSourceModelNormalDebugEntityInfo = info end
+    end
     if not enabled then
         NKM.GShaderSourceModelNormalPassReady = false
         NKM.GShaderSourceModelNormalLastError = nil
@@ -2476,11 +2499,11 @@ end)
 hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     if not NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then return end
 
-    local panelWidth = 448
-    local panelHeight = 246
+    local panelWidth = 520
+    local panelHeight = 292
     local panelX = ScrW() - panelWidth - 12
     local panelY = 12
-    local previewWidth = 204
+    local previewWidth = 234
     local previewHeight = previewWidth * ScrH() / math.max(ScrW(), 1)
     local previewY = panelY + 32
     local rawX = panelX + 10
@@ -2527,7 +2550,7 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     end
 
     local statusY = previewY + previewHeight + 22
-    draw.SimpleText(string.format("capture=%s  entity-lighting=%s  pass=%s  shader=%s  props=%d",
+    draw.SimpleText(string.format("capture=%s  entity=%s  pass=%s  shader=%s  props=%d",
         tostring(captureEnabled), tostring(entityPassEnabled), tostring(passReady),
         tostring(shaderReady), NKM.GShaderSourceModelNormalDraws or 0),
         "DermaDefault", panelX + 10, statusY, color_white)
@@ -2547,6 +2570,21 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
         draw.SimpleText(string.format("buffer updated %.2fs ago",
             math.max(0, RealTime() - NKM.GShaderSourceModelNormalDebugUpdatedAt)),
             "DermaDefault", panelX + 10, statusY + 30, Color(190, 210, 230))
+    end
+
+    local entityInfo = NKM.GShaderSourceModelNormalDebugEntityInfo
+    if entityInfo then
+        local position = entityInfo.position
+        local angles = entityInfo.angles
+        draw.SimpleText(string.format("nearest prop #%d %s | pos %.0f %.0f %.0f",
+            entityInfo.index, entityInfo.class, position.x, position.y, position.z),
+            "DermaDefault", panelX + 10, statusY + 45, Color(210, 220, 230))
+        draw.SimpleText(string.format("angles %.0f %.0f %.0f | model %s",
+            angles.p, angles.y, angles.r, string.sub(tostring(entityInfo.model), 1, 42)),
+            "DermaDefault", panelX + 10, statusY + 60, Color(210, 220, 230))
+    else
+        draw.SimpleText("nearest prop: none captured",
+            "DermaDefault", panelX + 10, statusY + 45, Color(190, 210, 230))
     end
 
     local debugError = NKM.GShaderSourceModelNormalDebugLastError
