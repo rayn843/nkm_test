@@ -2080,6 +2080,8 @@ local function drawNKMSourceModelNormalDepthDebugBuffers(viewSetup)
     return true
 end
 
+local drawNKMSourceModelLightFacingDebug
+
 local function drawNKMSourceModelNormalBuffer(viewSetup)
     local enabled = NKM_GShaderSourceModelNormalsConVar:GetBool()
         and NKM_GShaderEntityLightingConVar:GetBool()
@@ -2305,7 +2307,7 @@ local function drawNKMDecodedSourceModelNormalBuffer()
     return true
 end
 
-local function drawNKMSourceModelLightFacingDebug()
+drawNKMSourceModelLightFacingDebug = function()
     if not NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then return true end
 
     local target = NKM_GShaderSourceModelLightFacingDebugRT
