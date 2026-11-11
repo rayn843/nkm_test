@@ -109,6 +109,10 @@ local NKM_GShaderSourceModelNormalsDebugConVar = CreateClientConVar(
     "nkm_gshader_source_model_normals_debug", "0", true, false,
     "Show raw and decoded Source model-normal capture buffers and capture status."
 )
+local NKM_GShaderSourceModelNormalsDebugRasterConVar = CreateClientConVar(
+    "nkm_gshader_source_model_normals_debug_raster", "0", true, false,
+    "Raster test for ungated normal capture: 0=Z+cull, 1=no Z, 2=no cull, 3=no Z/no cull."
+)
 
 local GSHADER_NKM_STENCIL_BIT = 128
 local GSHADER_MAX_DYNAMIC_LIGHTS = 32
@@ -1839,12 +1843,17 @@ local function drawNKMSourceModelNormalUngatedDebugBuffer(viewSetup)
         cam.Start3D(viewSetup.origin, viewSetup.angles, viewSetup.fov,
             0, 0, width, height, viewSetup.znear or 1, viewSetup.zfar or 32768)
         cameraStarted = true
-        render.CullMode(MATERIAL_CULLMODE_CCW)
-        render.OverrideDepthEnable(true, true)
+        local rasterMode = math.Clamp(
+            math.floor(NKM_GShaderSourceModelNormalsDebugRasterConVar:GetFloat() + 0.5), 0, 3)
+        local disableDepth = rasterMode == 1 or rasterMode == 3
+        local disableCull = rasterMode == 2 or rasterMode == 3
+        render.CullMode(disableCull and MATERIAL_CULLMODE_NONE or MATERIAL_CULLMODE_CCW)
+        render.OverrideDepthEnable(true, not disableDepth)
         render.SetBlend(1)
         render.SetColorModulation(1, 1, 1)
         render.MaterialOverride(material)
 
+        NKM.GShaderSourceModelNormalUngatedDebugRasterMode = rasterMode
         local localPlayer = LocalPlayer()
         for _, entity in ipairs(ents.GetAll()) do
             if isSourceModelNormalCandidate(entity, localPlayer) then
@@ -2679,10 +2688,18 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     end
 
     local statusY = previewY + previewHeight + 22
-    draw.SimpleText(string.format("capture=%s  entity=%s  pass=%s  shader=%s  strict=%d  ungated=%d",
+    local rasterMode = NKM.GShaderSourceModelNormalUngatedDebugRasterMode
+        or math.Clamp(math.floor(NKM_GShaderSourceModelNormalsDebugRasterConVar:GetFloat() + 0.5), 0, 3)
+    local rasterLabels = {
+        [0] = "Z + cull",
+        [1] = "NO Z",
+        [2] = "NO CULL",
+        [3] = "NO Z + NO CULL"
+    }
+    draw.SimpleText(string.format("capture=%s entity=%s pass=%s shader=%s strict=%d raster=%s",
         tostring(captureEnabled), tostring(entityPassEnabled), tostring(passReady),
         tostring(shaderReady), NKM.GShaderSourceModelNormalDraws or 0,
-        NKM.GShaderSourceModelNormalUngatedDebugDraws or 0),
+        rasterLabels[rasterMode] or "unknown"),
         "DermaDefault", panelX + 10, statusY, color_white)
 
     local origin = NKM.GShaderSourceModelNormalDebugCameraOrigin
