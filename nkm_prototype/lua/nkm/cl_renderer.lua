@@ -2913,10 +2913,19 @@ local function drawNKMSceneLighting(viewSetup)
     local sourceWorldPosition = shaderlib.rt_WPDepth
     local entityLightingEnabled = NKM_GShaderEntityLightingConVar:GetBool()
 
-    local function bindLightingPass(worldPositionTexture, normalTexture)
+    local function bindLightingPass(worldPositionTexture, normalTexture, isSourcePass)
         render.UpdateScreenEffectTexture()
         local sceneTexture = render.GetScreenEffectTexture()
         if not sceneTexture then error("GMod screen-effect texture is unavailable") end
+
+        -- NKM pixels use NKM's static lighting and AO. Source model pixels
+        -- already contain Source's own material/lightmap lighting, so the
+        -- Source pass adds only NKM dynamic point lights on top of that result.
+        local aoStrength = 0
+        if not isSourcePass and deferred.ao ~= false and NKM_GShaderAOConVar:GetBool() then
+            aoStrength = deferred.aoStrength or 0.35
+        end
+        local applyNKMStaticLighting = usePixelStatic and not isSourcePass
 
         local setters = {
             { material.SetTexture, "$basetexture", worldPositionTexture },
@@ -2926,9 +2935,7 @@ local function drawNKMSceneLighting(viewSetup)
             { material.SetMatrix, "$viewprojmat", viewProjection },
             { material.SetFloat, "$c0_x", #pointLights },
             { material.SetFloat, "$c0_y", deferred.aoRadius or 72 },
-            { material.SetFloat, "$c0_z",
-                deferred.ao ~= false and NKM_GShaderAOConVar:GetBool()
-                    and (deferred.aoStrength or 0.35) or 0 },
+            { material.SetFloat, "$c0_z", aoStrength },
             { material.SetFloat, "$c0_w",
                 lighting.shadows ~= false and deferred.contactShadows ~= false
                     and NKM_GShaderContactShadowsConVar:GetBool() and 1 or 0 },
@@ -2937,7 +2944,7 @@ local function drawNKMSceneLighting(viewSetup)
             { material.SetFloat, "$c2_x", (ambient[1] or 0) / 255 },
             { material.SetFloat, "$c2_y", (ambient[2] or 0) / 255 },
             { material.SetFloat, "$c2_z", (ambient[3] or 0) / 255 },
-            { material.SetFloat, "$c2_w", usePixelStatic and 1 or 0 }
+            { material.SetFloat, "$c2_w", applyNKMStaticLighting and 1 or 0 }
         }
 
         for index = 1, 4 do
@@ -2970,7 +2977,7 @@ local function drawNKMSceneLighting(viewSetup)
         end
 
         -- Pass 0: NKM pixels. B of NKM_GShaderNormalRT is the NKM receiver mask.
-        bindLightingPass(NKM_GShaderWorldPosRT, NKM_GShaderNormalRT)
+        bindLightingPass(NKM_GShaderWorldPosRT, NKM_GShaderNormalRT, false)
         render.OverrideBlend(true, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
         resetNKMStencilState()
         render.SetMaterial(material)
@@ -2985,7 +2992,7 @@ local function drawNKMSceneLighting(viewSetup)
                 NKM.GShaderEntityLastError = NKM.GShaderEntityLastError
                     or "Source receiver normal-mask buffer was not built for this frame"
             else
-                bindLightingPass(sourceWorldPosition, NKM_GShaderSourceNormalRT)
+                bindLightingPass(sourceWorldPosition, NKM_GShaderSourceNormalRT, true)
                 render.SetMaterial(material)
                 shaderlib.DrawScreenQuad()
                 NKM.GShaderEntityPassCount = (NKM.GShaderEntityPassCount or 0) + 1
