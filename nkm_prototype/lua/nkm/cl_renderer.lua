@@ -2152,9 +2152,12 @@ local function getSourceBumpMaterial(entity, materialNames, materialIndex)
 
     local bumpOK, bumpTexture = pcall(sourceMaterial.GetTexture, sourceMaterial, "$bumpmap")
     if not bumpOK or not bumpTexture then return nil end
+    -- ITexture:IsError() does not identify the built-in pink/black error
+    -- texture. Check IsErrorTexture() independently or missing $bumpmap files
+    -- get decoded as real normal maps and stamp a checkerboard into lighting.
     local bumpErrorOK, bumpIsError = pcall(function()
-        if isfunction(bumpTexture.IsError) then return bumpTexture:IsError() end
-        if isfunction(bumpTexture.IsErrorTexture) then return bumpTexture:IsErrorTexture() end
+        if isfunction(bumpTexture.IsError) and bumpTexture:IsError() then return true end
+        if isfunction(bumpTexture.IsErrorTexture) and bumpTexture:IsErrorTexture() then return true end
         return false
     end)
     if not bumpErrorOK or bumpIsError then return nil end
@@ -2397,6 +2400,21 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
 
         local function captureEntityMaterials(sourceEntity, drawEntity)
             local materialNames = sourceEntity:GetMaterials() or {}
+            local modelPath = sourceEntity:GetModel()
+            if isstring(modelPath) and modelPath ~= "" and isfunction(util.GetModelInfo) then
+                local infoOK, modelInfo = pcall(util.GetModelInfo, modelPath)
+                if infoOK and istable(modelInfo) then
+                    local expectedMaterialCount = tonumber(modelInfo.MaterialCount)
+                    -- Entity:GetMaterials() omits missing VMTs, shifting every
+                    -- later index. MaterialOverrideByIndex still addresses the
+                    -- original model slot, so never pair those shifted names
+                    -- with slot indices. The geometric-normal fallback is safe.
+                    if expectedMaterialCount and expectedMaterialCount > 0
+                        and #materialNames ~= expectedMaterialCount then
+                        return
+                    end
+                end
+            end
             if #materialNames == 0 or #materialNames > 32 then return end
 
             for materialIndex = 0, 31 do
