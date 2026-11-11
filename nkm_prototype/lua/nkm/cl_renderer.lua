@@ -1813,6 +1813,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         NKM.GShaderSourceModelNormalLastError = nil
         NKM.GShaderSourceModelNormalDebugCameraOrigin = nil
         NKM.GShaderSourceModelNormalDebugCameraAngles = nil
+        NKM.GShaderSourceModelNormalDebugUpdatedAt = nil
         return true, nil, 0
     end
 
@@ -1917,7 +1918,11 @@ local function drawNKMDecodedSourceModelNormalBuffer()
     if not source or not target then
         return false, "Source model-normal debug render targets are unavailable"
     end
-    if not material or material:IsError() then
+    if not material then
+        return false, "Source model-normal decode shader is unavailable"
+    end
+    local materialOK, isError = pcall(material.IsError, material)
+    if not materialOK or isError then
         return false, "Source model-normal decode shader is unavailable"
     end
 
