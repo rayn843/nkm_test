@@ -4,8 +4,9 @@
 #include "common_octahedron_encoding.h"
 
 sampler SourceWorldPositionBuffer : register(s0); // GShader _rt_WPDepth
-sampler SourceModelNormalBuffer   : register(s1); // captured skinned model normals
+sampler SourceModelNormalBuffer   : register(s1); // optional captured skinned/bump model normals
 sampler DynamicLightBuffer        : register(s2); // 2x32 point-light LUT
+sampler SourceReceiverNormalBuffer : register(s3); // reconstructed Source normals + receiver mask
 const float4 LightParams : register(c0); // x = active point-light count
 
 struct PS_INPUT
@@ -31,13 +32,20 @@ float4 main(PS_INPUT input) : COLOR0
 {
     float2 uv = saturate(input.uv);
     float4 worldPositionDepth = tex2Dlod(SourceWorldPositionBuffer, float4(uv, 0, 0));
-    float4 packedNormal = tex2Dlod(SourceModelNormalBuffer, float4(uv, 0, 0));
+    float4 capturedModelNormal = tex2Dlod(SourceModelNormalBuffer, float4(uv, 0, 0));
+    float4 receiverNormal = tex2Dlod(SourceReceiverNormalBuffer, float4(uv, 0, 0));
 
-    if (worldPositionDepth.a <= SOURCE_SKY_DEPTH || packedNormal.b < 0.5)
+    // Match the actual Source deferred pass: only visible Source pixels with
+    // an NKM receiver behind them participate. Use the captured bump/skinned
+    // normal when present; ordinary props and materials without a bump map
+    // fall back to GShader's reconstructed per-pixel geometric normal.
+    if (worldPositionDepth.a <= SOURCE_SKY_DEPTH || receiverNormal.b < 0.5)
         return float4(0.0, 0.0, 0.0, 1.0);
 
     float3 worldPosition = SafeUnpackWorldPos(worldPositionDepth.rgb);
-    float3 worldNormal = Decode(packedNormal.rg);
+    float3 worldNormal = capturedModelNormal.b >= 0.5
+        ? Decode(capturedModelNormal.rg)
+        : Decode(receiverNormal.rg);
     float maxDiffuse = 0.0;
 
     int lightCount = (int)clamp(LightParams.x, 0.0, MAX_POINT_LIGHTS);

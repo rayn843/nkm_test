@@ -1612,6 +1612,8 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
                     ["$texture1"] = "_rt_NKM_SourceModelNormals",
                     ["$linearread_texture1"] = "1",
                     ["$texture2"] = "_rt_NKM_DynamicLights",
+                    ["$texture3"] = "_rt_NKM_SourceNormals",
+                    ["$linearread_texture3"] = "1",
                     ["$no_fullbright"] = "1",
                     ["$ignorez"] = "1",
                     ["$VERTEXTRANSFORM"] = "1",
@@ -2509,10 +2511,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
             NKM.GShaderSourceModelNormalDepthDebugError = tostring(depthDebugError)
         end
 
-        local facingDebugOK, facingDebugError = drawNKMSourceModelLightFacingDebug()
-        if not facingDebugOK then
-            NKM.GShaderSourceModelLightFacingDebugError = tostring(facingDebugError)
-        end
     end
 
     if not ok then return false, tostring(err), bumpDraws end
@@ -2572,9 +2570,13 @@ drawNKMSourceModelLightFacingDebug = function()
 
     local pushedTarget, cameraStarted = false, false
     local ok, err = pcall(function()
+        if not NKM_GShaderSourceNormalRT then
+            error("Source receiver-normal fallback buffer is unavailable")
+        end
         material:SetTexture("$basetexture", sourceWorldPosition)
         material:SetTexture("$texture1", NKM_GShaderSourceModelNormalRT)
         material:SetTexture("$texture2", NKM.GShaderDynamicLightLUT)
+        material:SetTexture("$texture3", NKM_GShaderSourceNormalRT)
         material:SetFloat("$c0_x", #((NKM.ClientDynamicLights) or {}))
 
         render.PushRenderTarget(target)
@@ -2963,6 +2965,15 @@ local function buildNKMReconstructionBuffers(viewSetup)
         NKM.GShaderEntityLastError = nil
     else
         NKM.GShaderEntityLastError = "Source receiver mask failed: " .. tostring(sourceMaskError)
+    end
+
+    if NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then
+        local facingDebugOK, facingDebugError = drawNKMSourceModelLightFacingDebug()
+        if not facingDebugOK then
+            NKM.GShaderSourceModelLightFacingDebugError = tostring(facingDebugError)
+        else
+            NKM.GShaderSourceModelLightFacingDebugError = nil
+        end
     end
 
     if NKM.GShaderNKMBufferDebug then
