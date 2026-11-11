@@ -1845,10 +1845,12 @@ local function drawNKMSourceModelNormalUngatedDebugBuffer(viewSetup)
         cameraStarted = true
         local rasterMode = math.Clamp(
             math.floor(NKM_GShaderSourceModelNormalsDebugRasterConVar:GetFloat() + 0.5), 0, 3)
-        local disableDepth = rasterMode == 1 or rasterMode == 3
+        local disableDepthWrite = rasterMode == 1 or rasterMode == 3
         local disableCull = rasterMode == 2 or rasterMode == 3
         render.CullMode(disableCull and MATERIAL_CULLMODE_NONE or MATERIAL_CULLMODE_CCW)
-        render.OverrideDepthEnable(true, not disableDepth)
+        -- OverrideDepthEnable controls depth writes, not the depth test itself.
+        -- The hardware Z test remains active in all four diagnostic modes.
+        render.OverrideDepthEnable(true, not disableDepthWrite)
         render.SetBlend(1)
         render.SetColorModulation(1, 1, 1)
         render.MaterialOverride(material)
@@ -2691,10 +2693,10 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     local rasterMode = NKM.GShaderSourceModelNormalUngatedDebugRasterMode
         or math.Clamp(math.floor(NKM_GShaderSourceModelNormalsDebugRasterConVar:GetFloat() + 0.5), 0, 3)
     local rasterLabels = {
-        [0] = "Z + cull",
-        [1] = "NO Z",
-        [2] = "NO CULL",
-        [3] = "NO Z + NO CULL"
+        [0] = "Z test/write + cull",
+        [1] = "Z test, no write + cull",
+        [2] = "Z test/write, no cull",
+        [3] = "Z test, no write/cull"
     }
     draw.SimpleText(string.format("capture=%s entity=%s pass=%s shader=%s strict=%d raster=%s",
         tostring(captureEnabled), tostring(entityPassEnabled), tostring(passReady),
