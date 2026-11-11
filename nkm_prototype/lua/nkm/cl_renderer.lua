@@ -2060,7 +2060,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
             end)
             if pushedTarget then pcall(render.PopRenderTarget) end
         end
-        for _, debugTarget in ipairs({
+        for _, debugTarget in pairs({
             NKM_GShaderSourceModelNormalDepthDeltaRT,
             NKM_GShaderSourceModelNormalRejectMaskRT
         }) do
