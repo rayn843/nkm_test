@@ -1243,7 +1243,7 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     if not NKM_GShaderVertexNormalDecodeMaterial then
         local materialOK, material = pcall(CreateMaterial, "nkm_gshader_vertex_normal_decode_debug",
             "screenspace_general", {
-                ["$pixshader"] = "nkm_source_model_normal_visualize_ps30",
+                ["$pixshader"] = "wn_tangetns_decode_ps30",
                 ["$vertexshader"] = "pp_vs30",
                 ["$basetexture"] = "_rt_NKM_VertexNormals",
                 ["$no_fullbright"] = "1",
@@ -1545,7 +1545,7 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
         if not NKM_GShaderSourceModelNormalDecodeMaterial then
             local materialOK, material = pcall(CreateMaterial,
                 "nkm_gshader_source_model_normal_decode_debug", "screenspace_general", {
-                    ["$pixshader"] = "wn_tangetns_decode_ps30",
+                    ["$pixshader"] = "nkm_source_model_normal_visualize_ps30",
                     ["$vertexshader"] = "pp_vs30",
                     ["$basetexture"] = "_rt_NKM_SourceModelNormals",
                     ["$no_fullbright"] = "1",
