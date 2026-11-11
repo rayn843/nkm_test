@@ -1046,7 +1046,6 @@ local NKM_GShaderSourceModelNormalDepthDeltaRT
 local NKM_GShaderSourceModelNormalRejectMaskRT
 local NKM_GShaderSourceModelNormalMaterial
 local NKM_GShaderSourceModelBumpMaterial
-local NKM_GShaderSourceModelBumpHiddenMaterial
 local NKM_GShaderPlayerBumpCaptureModels = {}
 local NKM_GShaderSourceModelNormalDecodedRT
 local NKM_GShaderSourceModelNormalDecodeMaterial
@@ -1494,24 +1493,6 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
         elseif NKM_GShaderSourceModelNormalsConVar:GetBool() then
             NKM.GShaderSourceModelNormalLastError =
                 tostring(material or "Source model bump-capture material is unavailable")
-        end
-    end
-
-    if not NKM_GShaderSourceModelBumpHiddenMaterial then
-        -- Every model material slot except the one currently being captured
-        -- must be discarded before color/depth writes. The capture pass forces depth
-        -- writes for the active slot, so a merely translucent hidden material
-        -- is insufficient; alpha=0 plus alpha-test guarantees no hidden fragments.
-        local hiddenOK, hidden = pcall(CreateMaterial,
-            "nkm_source_model_bump_hidden_alphatest", "UnlitGeneric", {
-                ["$basetexture"] = "color/white",
-                ["$alpha"] = "0",
-                ["$alphatest"] = "1",
-                ["$alphatestreference"] = "0.5",
-                ["$nocull"] = "1"
-            })
-        if hiddenOK and hidden then
-            NKM_GShaderSourceModelBumpHiddenMaterial = hidden
         end
     end
 
@@ -2349,7 +2330,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     end
 
     local material = NKM_GShaderSourceModelBumpMaterial
-    local hiddenMaterial = NKM_GShaderSourceModelBumpHiddenMaterial
     local sourceWorldPosition = shaderlib.rt_WPDepth
     NKM.GShaderSourceModelNormalDebugCameraOrigin = Vector(
         viewSetup.origin.x, viewSetup.origin.y, viewSetup.origin.z)
@@ -2363,16 +2343,9 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
 
     local ok, err = pcall(function()
         if not sourceWorldPosition then error("GShader Source world-position buffer is unavailable") end
-        if not isfunction(render.MaterialOverrideByIndex) then
-            error("render.MaterialOverrideByIndex is unavailable")
-        end
         if not material or material:IsError() then
             error("nkm_source_model_bump_ps30/vs30 is not compiled/available")
         end
-        if not hiddenMaterial or hiddenMaterial:IsError() then
-            error("Source model bump hidden material is unavailable")
-        end
-
         material:SetTexture("$basetexture", sourceWorldPosition)
         material:SetFloat("$c0_x", 1 / math.max(width, 1))
         material:SetFloat("$c0_y", 1 / math.max(height, 1))
@@ -2405,51 +2378,52 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
                 local infoOK, modelInfo = pcall(util.GetModelInfo, modelPath)
                 if infoOK and istable(modelInfo) then
                     local expectedMaterialCount = tonumber(modelInfo.MaterialCount)
-                    -- Entity:GetMaterials() omits missing VMTs, shifting every
-                    -- later index. MaterialOverrideByIndex still addresses the
-                    -- original model slot, so never pair those shifted names
-                    -- with slot indices. The geometric-normal fallback is safe.
+                    -- GetMaterials() may omit missing VMTs, so its entries cannot
+                    -- safely be paired with model material indices in that case.
                     if expectedMaterialCount and expectedMaterialCount > 0
                         and #materialNames ~= expectedMaterialCount then
                         return
                     end
                 end
             end
-            if #materialNames == 0 or #materialNames > 32 then return end
 
-            for materialIndex = 0, 31 do
-                render.MaterialOverrideByIndex(materialIndex, hiddenMaterial)
-            end
+            -- The former per-slot implementation called DrawModel() once for
+            -- every bump-enabled slot, re-rasterizing the whole model repeatedly
+            -- and relying on alpha-tested overrides to erase all other slots.
+            -- This produced visible duplicate/Z-fighting artifacts on some props.
+            -- Until a true per-submesh draw path exists, only capture single-slot
+            -- models in one DrawModel() call. Multi-slot models safely use the
+            -- established screen-space geometric-normal fallback.
+            if #materialNames ~= 1 then return end
 
+            local bumpData = getSourceBumpMaterial(sourceEntity, materialNames, 0)
+            if not bumpData then return end
+
+            material:SetTexture("$texture1", bumpData.texture)
+            material:SetFloat("$c1_x", bumpData.decodeMode)
+            local transform = bumpData.transform
+            material:SetFloat("$c2_x", transform[1])
+            material:SetFloat("$c2_y", transform[2])
+            material:SetFloat("$c2_z", transform[3])
+            material:SetFloat("$c2_w", transform[4])
+            material:SetFloat("$c3_x", transform[5])
+            material:SetFloat("$c3_y", transform[6])
+            material:SetFloat("$c3_z", transform[7])
+            material:SetFloat("$c3_w", transform[8])
+
+            -- One material slot means a global override is sufficient: no hidden
+            -- slot material, indexed overrides, or repeated whole-model draws.
+            render.MaterialOverride(material)
+            local drawOK = pcall(function() drawEntity:DrawModel() end)
+            render.MaterialOverride(nil)
             local capturedForEntity = 0
-            for materialIndex = 0, math.min(#materialNames, 32) - 1 do
-                local bumpData = getSourceBumpMaterial(sourceEntity, materialNames, materialIndex)
-                if bumpData then
-                    material:SetTexture("$texture1", bumpData.texture)
-                    material:SetFloat("$c1_x", bumpData.decodeMode)
-                    local transform = bumpData.transform
-                    material:SetFloat("$c2_x", transform[1])
-                    material:SetFloat("$c2_y", transform[2])
-                    material:SetFloat("$c2_z", transform[3])
-                    material:SetFloat("$c2_w", transform[4])
-                    material:SetFloat("$c3_x", transform[5])
-                    material:SetFloat("$c3_y", transform[6])
-                    material:SetFloat("$c3_z", transform[7])
-                    material:SetFloat("$c3_w", transform[8])
-
-                    render.MaterialOverrideByIndex(materialIndex, material)
-                    local drawOK = pcall(function() drawEntity:DrawModel() end)
-                    render.MaterialOverrideByIndex(materialIndex, hiddenMaterial)
-                    if drawOK then
-                        capturedForEntity = capturedForEntity + 1
-                        bumpDraws = bumpDraws + 1
-                    else
-                        failedModels = failedModels + 1
-                    end
-                end
+            if drawOK then
+                capturedForEntity = 1
+                bumpDraws = bumpDraws + 1
+            else
+                failedModels = failedModels + 1
             end
 
-            render.MaterialOverrideByIndex()
             if capturedForEntity > 0 then
                 local delta = sourceEntity:GetPos() - viewSetup.origin
                 local distanceSqr = delta:LengthSqr()
@@ -2468,7 +2442,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
                 end)
                 if not drawOK then
                     failedModels = failedModels + 1
-                    render.MaterialOverrideByIndex()
                 end
             elseif isSourceAnimatedBumpCandidate(entity) then
                 local clone = syncSourceAnimatedBumpClone(entity)
@@ -2476,7 +2449,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
                     local drawOK = pcall(function() captureEntityMaterials(entity, clone) end)
                     if not drawOK then
                         failedModels = failedModels + 1
-                        render.MaterialOverrideByIndex()
                     end
                 else
                     failedModels = failedModels + 1
@@ -2484,7 +2456,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
             end
         end
 
-        render.MaterialOverrideByIndex()
         render.OverrideDepthEnable(false, false)
         render.CullMode(MATERIAL_CULLMODE_CCW)
         render.SetColorModulation(1, 1, 1)
@@ -2494,7 +2465,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     end)
 
     render.MaterialOverride(nil)
-    if isfunction(render.MaterialOverrideByIndex) then pcall(render.MaterialOverrideByIndex) end
     render.OverrideDepthEnable(false, false)
     render.CullMode(MATERIAL_CULLMODE_CCW)
     render.SetColorModulation(1, 1, 1)
