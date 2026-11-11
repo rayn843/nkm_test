@@ -35,9 +35,11 @@ float4 main(PS_INPUT input) : COLOR0
         / max(expectedDepth, 0.00025);
     float depthTolerance = max(ModelNormalParams.z, 0.0005);
 
-    // Discard hidden model surfaces and pixels that do not belong to the
-    // currently visible Source depth buffer.
-    if (sceneDepth <= 0.00025 || relativeDepthDelta > depthTolerance)
+    // Strict capture rejects hidden/mismatched fragments. Debug c0.w=1 bypasses
+    // only this comparison to reveal whether the missing RAW pixels originate
+    // in scene-depth registration or earlier in model rasterization/normal data.
+    if (ModelNormalParams.w < 0.5
+        && (sceneDepth <= 0.00025 || relativeDepthDelta > depthTolerance))
         clip(-1.0);
 
     float3 normal = normalize(input.worldNormal);
