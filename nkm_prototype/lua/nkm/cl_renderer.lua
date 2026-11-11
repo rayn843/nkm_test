@@ -2512,7 +2512,7 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     surface.DrawOutlinedRect(decodedX, previewY, previewWidth, previewHeight, 1)
     draw.SimpleText("RAW: R/G=oct normal, B=coverage", "DermaDefault",
         rawX, previewY + previewHeight + 3, color_white)
-    draw.SimpleText("DECODED: RGB=world normal", "DermaDefault",
+    draw.SimpleText("DECODED: RGB=normal direction", "DermaDefault",
         decodedX, previewY + previewHeight + 3, color_white)
 
     local captureEnabled = NKM_GShaderSourceModelNormalsConVar:GetBool()
