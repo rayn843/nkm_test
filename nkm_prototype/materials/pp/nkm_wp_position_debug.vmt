@@ -1,0 +1,20 @@
+screenspace_general
+{
+    "$pixshader" "nkm_wp_position_debug_ps30"
+    "$vertexshader" "pp_vs30"
+    "$baseTexture" "_rt_NKM_WPDepth"
+
+    "$no_fullbright" "1"
+    "$ignorez" "1"
+    "$VERTEXTRANSFORM" "1"
+    "$LINEARREAD_BASETEXTURE" "1"
+    "$WRITEALPHA" "1"
+    "$copyalpha" "1"
+    "$vertexalpha" "1"
+    "$linearwrite" "1"
+
+    "<dx90"
+    {
+        "$no_draw" "1"
+    }
+}
