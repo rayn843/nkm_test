@@ -103,7 +103,7 @@ local NKM_GShaderSourceNormalSmoothingConVar = CreateClientConVar(
 )
 local NKM_GShaderSourceModelNormalsConVar = CreateClientConVar(
     "nkm_gshader_source_model_normals", "0", true, false,
-    "Experimental: use skinned interpolated Source model vertex normals instead of depth-reconstructed normals."
+    "Use skinned vertex normals for compatible opaque engine models; players, NPCs and scripted entities use depth-reconstructed normals."
 )
 local NKM_GShaderSourceModelNormalsDebugConVar = CreateClientConVar(
     "nkm_gshader_source_model_normals_debug", "0", true, false,
@@ -1855,30 +1855,36 @@ local function drawNKMReconstruction(material, target, worldProjection, eyePosit
     return true
 end
 
-local NKM_SOURCE_MODEL_NORMAL_PROP_CLASSES = {
-    prop_physics = true,
-    prop_physics_multiplayer = true,
-    prop_dynamic = true,
-    prop_dynamic_override = true,
-    prop_ragdoll = true
-}
-
 local function isSourceModelNormalCandidate(entity, localPlayer)
-    if not IsValid(entity) or entity:IsWorld() or entity:GetNoDraw() then return false end
+    if not IsValid(entity) or entity:IsWorld() or entity == localPlayer or entity:GetNoDraw() then
+        return false
+    end
     if entity:GetRenderMode() ~= RENDERMODE_NORMAL then return false end
 
-    -- Do not call DrawModel on players/NPCs/weapons here. Their draw paths can
-    -- execute addon-specific hooks (for example weapon worldmodel attachments)
-    -- which assume the normal player render context and may error in this RT pass.
+    -- Do not call DrawModel on players/NPCs/weapons here. Player:DrawModel can
+    -- re-enter player draw hooks, while weapon/addon hooks may assume the normal
+    -- player render context. These entities retain the screen-space normal path.
     if isfunction(entity.IsPlayer) and entity:IsPlayer() then return false end
     if isfunction(entity.IsNPC) and entity:IsNPC() then return false end
     if isfunction(entity.IsWeapon) and entity:IsWeapon() then return false end
 
-    -- Restrict this experimental re-render to stock opaque prop classes. Custom
-    -- scripted entities stay on GShader's depth-reconstructed normal fallback.
     local class = entity:GetClass()
-    if not NKM_SOURCE_MODEL_NORMAL_PROP_CLASSES[class] then return false end
 
+    -- A manual DrawModel outside the entity's regular render pass can invoke
+    -- scripted Draw/DrawTranslucent code. Keep scripted entities on the
+    -- depth-reconstructed fallback unless they get a dedicated safe capture path.
+    if scripted_ents and isfunction(scripted_ents.GetStored) then
+        local storedOK, stored = pcall(scripted_ents.GetStored, class)
+        if storedOK and istable(stored) then return false end
+    end
+
+    -- Addon-provided render overrides may depend on state from the normal
+    -- scene pass, so do not execute them again in this auxiliary RT render.
+    local overrideOK, renderOverride = pcall(function() return entity.RenderOverride end)
+    if overrideOK and isfunction(renderOverride) then return false end
+
+    -- Include every compatible engine-managed opaque model entity, not only
+    -- five hard-coded prop classes. This covers built-in prop/vehicle variants.
     local model = entity:GetModel()
     if not isstring(model) or model == "" or string.sub(model, 1, 1) == "*" then return false end
 
@@ -2972,14 +2978,14 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     if entityInfo then
         local position = entityInfo.position
         local angles = entityInfo.angles
-        draw.SimpleText(string.format("nearest prop #%d %s | pos %.0f %.0f %.0f",
+        draw.SimpleText(string.format("nearest entity #%d %s | pos %.0f %.0f %.0f",
             entityInfo.index, entityInfo.class, position.x, position.y, position.z),
             "DermaDefault", panelX + 10, statusY + 45, Color(210, 220, 230))
         draw.SimpleText(string.format("angles %.0f %.0f %.0f | model %s",
             angles.p, angles.y, angles.r, string.sub(tostring(entityInfo.model), 1, 42)),
             "DermaDefault", panelX + 10, statusY + 60, Color(210, 220, 230))
     else
-        draw.SimpleText("nearest prop: none captured",
+        draw.SimpleText("nearest entity: none captured",
             "DermaDefault", panelX + 10, statusY + 45, Color(190, 210, 230))
     end
 
