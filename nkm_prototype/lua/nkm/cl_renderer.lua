@@ -2925,7 +2925,7 @@ local function drawNKMSceneLighting(viewSetup)
         if not isSourcePass and deferred.ao ~= false and NKM_GShaderAOConVar:GetBool() then
             aoStrength = deferred.aoStrength or 0.35
         end
-        local applyNKMStaticLighting = usePixelStatic and not isSourcePass
+        local applyNKMStaticLighting = usePixelStatic
 
         local setters = {
             { material.SetTexture, "$basetexture", worldPositionTexture },
