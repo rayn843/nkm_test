@@ -105,6 +105,10 @@ local NKM_GShaderSourceModelNormalsConVar = CreateClientConVar(
     "nkm_gshader_source_model_normals", "0", true, false,
     "Experimental: use skinned interpolated Source model vertex normals instead of depth-reconstructed normals."
 )
+local NKM_GShaderSourceModelNormalsDebugConVar = CreateClientConVar(
+    "nkm_gshader_source_model_normals_debug", "0", true, false,
+    "Show raw and decoded Source model-normal capture buffers and capture status."
+)
 
 local GSHADER_NKM_STENCIL_BIT = 128
 local GSHADER_MAX_DYNAMIC_LIGHTS = 32
@@ -1034,6 +1038,8 @@ local NKM_GShaderSourceNormalRT
 local NKM_GShaderSourceNormalMaskMaterial
 local NKM_GShaderSourceModelNormalRT
 local NKM_GShaderSourceModelNormalMaterial
+local NKM_GShaderSourceModelNormalDecodedRT
+local NKM_GShaderSourceModelNormalDecodeMaterial
 local NKM_GShaderDecodedWorldPosRT
 local NKM_GShaderWorldPosDebugMaterial
 local NKM_GShaderWorldPosSampler2RT
@@ -1434,7 +1440,10 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
 end
 
 local function ensureNKMSourceModelNormalResources(width, height, flags)
-    if not NKM_GShaderSourceModelNormalsConVar:GetBool() then return false end
+    if not NKM_GShaderSourceModelNormalsConVar:GetBool()
+        and not NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then
+        return false
+    end
 
     local targetReady = NKM_GShaderSourceModelNormalRT
         and NKM_GShaderSourceModelNormalRT:Width() == width
@@ -1461,6 +1470,50 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
             end
         elseif NKM_GShaderSourceModelNormalsConVar:GetBool() then
             NKM.GShaderSourceModelNormalLastError = tostring(material or "Source model-normal material is unavailable")
+        end
+    end
+
+    if NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then
+        local decodedReady = NKM_GShaderSourceModelNormalDecodedRT
+            and NKM_GShaderSourceModelNormalDecodedRT:Width() == width
+            and NKM_GShaderSourceModelNormalDecodedRT:Height() == height
+        if not decodedReady then
+            local targetOK, target = pcall(GetRenderTargetEx,
+                "_rt_NKM_SourceModelNormalsDecoded", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+                MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA16161616F)
+            NKM_GShaderSourceModelNormalDecodedRT = targetOK and target or nil
+            if not NKM_GShaderSourceModelNormalDecodedRT then
+                NKM.GShaderSourceModelNormalDebugLastError =
+                    tostring(target or "Decoded Source model-normal RT creation failed")
+            end
+        end
+
+        if not NKM_GShaderSourceModelNormalDecodeMaterial then
+            local materialOK, material = pcall(CreateMaterial,
+                "nkm_gshader_source_model_normal_decode_debug", "screenspace_general", {
+                    ["$pixshader"] = "wn_tangetns_decode_ps30",
+                    ["$vertexshader"] = "pp_vs30",
+                    ["$basetexture"] = "_rt_NKM_SourceModelNormals",
+                    ["$no_fullbright"] = "1",
+                    ["$ignorez"] = "1",
+                    ["$VERTEXTRANSFORM"] = "1",
+                    ["$WRITEALPHA"] = "1",
+                    ["$copyalpha"] = "1",
+                    ["$vertexalpha"] = "1"
+                })
+            if materialOK and material then
+                local errorOK, isError = pcall(material.IsError, material)
+                if errorOK and not isError then
+                    NKM_GShaderSourceModelNormalDecodeMaterial = material
+                    NKM.GShaderSourceModelNormalDebugLastError = nil
+                else
+                    NKM.GShaderSourceModelNormalDebugLastError =
+                        "wn_tangetns_decode_ps30 is unavailable for the debug view"
+                end
+            else
+                NKM.GShaderSourceModelNormalDebugLastError =
+                    tostring(material or "Source model-normal decode material creation failed")
+            end
         end
     end
 
@@ -1739,14 +1792,30 @@ end
 local function drawNKMSourceModelNormalBuffer(viewSetup)
     local enabled = NKM_GShaderSourceModelNormalsConVar:GetBool()
         and NKM_GShaderEntityLightingConVar:GetBool()
+    local target = NKM_GShaderSourceModelNormalRT
     if not enabled then
+        -- Do not leave a previous frame's capture visible in the debug view or
+        -- available for accidental sampling after the feature is switched off.
+        if target then
+            local pushedTarget = false
+            local clearOK, clearError = pcall(function()
+                render.PushRenderTarget(target)
+                pushedTarget = true
+                render.Clear(0, 0, 0, 0, true, true)
+            end)
+            if pushedTarget then pcall(render.PopRenderTarget) end
+            if not clearOK then
+                NKM.GShaderSourceModelNormalDebugLastError = tostring(clearError)
+            end
+        end
         NKM.GShaderSourceModelNormalPassReady = false
         NKM.GShaderSourceModelNormalDraws = 0
         NKM.GShaderSourceModelNormalLastError = nil
+        NKM.GShaderSourceModelNormalDebugCameraOrigin = nil
+        NKM.GShaderSourceModelNormalDebugCameraAngles = nil
         return true, nil, 0
     end
 
-    local target = NKM_GShaderSourceModelNormalRT
     if not target then
         NKM.GShaderSourceModelNormalPassReady = false
         NKM.GShaderSourceModelNormalLastError = "Source model-normal render target is unavailable"
@@ -1755,6 +1824,11 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
 
     local material = NKM_GShaderSourceModelNormalMaterial
     local sourceWorldPosition = shaderlib.rt_WPDepth
+    NKM.GShaderSourceModelNormalDebugCameraOrigin = Vector(
+        viewSetup.origin.x, viewSetup.origin.y, viewSetup.origin.z)
+    NKM.GShaderSourceModelNormalDebugCameraAngles = Angle(
+        viewSetup.angles.p, viewSetup.angles.y, viewSetup.angles.r)
+    NKM.GShaderSourceModelNormalDebugUpdatedAt = RealTime()
     local pushedTarget, cameraStarted = false, false
     local drawnModels, failedModels = 0, 0
     local width, height = ScrW(), ScrH()
@@ -1834,6 +1908,36 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
 
     if not ok then return false, tostring(err), drawnModels end
     return true, nil, drawnModels
+end
+
+local function drawNKMDecodedSourceModelNormalBuffer()
+    local source = NKM_GShaderSourceModelNormalRT
+    local target = NKM_GShaderSourceModelNormalDecodedRT
+    local material = NKM_GShaderSourceModelNormalDecodeMaterial
+    if not source or not target then
+        return false, "Source model-normal debug render targets are unavailable"
+    end
+    if not material or material:IsError() then
+        return false, "Source model-normal decode shader is unavailable"
+    end
+
+    local pushedTarget, cameraStarted = false, false
+    local ok, err = pcall(function()
+        material:SetTexture("$basetexture", source)
+        render.PushRenderTarget(target)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(material)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then return false, tostring(err) end
+    return true
 end
 
 local function drawNKMSourceNormalMask()
@@ -2188,6 +2292,13 @@ local function buildNKMReconstructionBuffers(viewSetup)
         NKM.GShaderSourceModelNormalLastError = tostring(modelNormalError)
     end
 
+    if NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then
+        local decodedOK, decodedError = drawNKMDecodedSourceModelNormalBuffer()
+        NKM.GShaderSourceModelNormalDebugLastError = decodedOK and nil or tostring(decodedError)
+    else
+        NKM.GShaderSourceModelNormalDebugLastError = nil
+    end
+
     local sourceMaskOK, sourceMaskError = drawNKMSourceNormalMask()
     NKM.GShaderSourceNormalMaskReady = sourceMaskOK == true
     if sourceMaskOK then
@@ -2354,6 +2465,91 @@ hook.Add("HUDPaint", "NKM.GShaderNKMBufferDebug", function()
     if NKM.GShaderNKMBufferDebugPointLightError then
         draw.SimpleText("Point-light debug: " .. tostring(NKM.GShaderNKMBufferDebugPointLightError),
             "DermaDefault", 8, y - 126, Color(255, 100, 100))
+    end
+end)
+
+hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
+    if not NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then return end
+
+    local panelWidth = 448
+    local panelHeight = 246
+    local panelX = ScrW() - panelWidth - 12
+    local panelY = 12
+    local previewWidth = 204
+    local previewHeight = previewWidth * ScrH() / math.max(ScrW(), 1)
+    local previewY = panelY + 32
+    local rawX = panelX + 10
+    local decodedX = rawX + previewWidth + 10
+
+    surface.SetDrawColor(9, 13, 20, 232)
+    surface.DrawRect(panelX, panelY, panelWidth, panelHeight)
+    surface.SetDrawColor(90, 145, 190, 230)
+    surface.DrawOutlinedRect(panelX, panelY, panelWidth, panelHeight, 1)
+    draw.SimpleText("SOURCE MODEL NORMAL CAPTURE", "DermaDefaultBold",
+        panelX + 10, panelY + 8, color_white)
+
+    if NKM_GShaderSourceModelNormalRT then
+        render.DrawTextureToScreenRect(
+            NKM_GShaderSourceModelNormalRT, rawX, previewY, previewWidth, previewHeight)
+    else
+        surface.SetDrawColor(30, 30, 36, 255)
+        surface.DrawRect(rawX, previewY, previewWidth, previewHeight)
+    end
+    if NKM_GShaderSourceModelNormalDecodedRT then
+        render.DrawTextureToScreenRect(
+            NKM_GShaderSourceModelNormalDecodedRT, decodedX, previewY, previewWidth, previewHeight)
+    else
+        surface.SetDrawColor(30, 30, 36, 255)
+        surface.DrawRect(decodedX, previewY, previewWidth, previewHeight)
+    end
+    surface.SetDrawColor(190, 190, 190, 220)
+    surface.DrawOutlinedRect(rawX, previewY, previewWidth, previewHeight, 1)
+    surface.DrawOutlinedRect(decodedX, previewY, previewWidth, previewHeight, 1)
+    draw.SimpleText("RAW: R/G=oct normal, B=coverage", "DermaDefault",
+        rawX, previewY + previewHeight + 3, color_white)
+    draw.SimpleText("DECODED: RGB=world normal", "DermaDefault",
+        decodedX, previewY + previewHeight + 3, color_white)
+
+    local captureEnabled = NKM_GShaderSourceModelNormalsConVar:GetBool()
+    local entityPassEnabled = NKM_GShaderEntityLightingConVar:GetBool()
+    local passReady = NKM.GShaderSourceModelNormalPassReady == true
+    local shaderReady = false
+    if NKM_GShaderSourceModelNormalMaterial then
+        local shaderOK, isError = pcall(
+            NKM_GShaderSourceModelNormalMaterial.IsError,
+            NKM_GShaderSourceModelNormalMaterial)
+        shaderReady = shaderOK and not isError
+    end
+
+    local statusY = previewY + previewHeight + 22
+    draw.SimpleText(string.format("capture=%s  entity-lighting=%s  pass=%s  shader=%s  props=%d",
+        tostring(captureEnabled), tostring(entityPassEnabled), tostring(passReady),
+        tostring(shaderReady), NKM.GShaderSourceModelNormalDraws or 0),
+        "DermaDefault", panelX + 10, statusY, color_white)
+
+    local origin = NKM.GShaderSourceModelNormalDebugCameraOrigin
+    local angles = NKM.GShaderSourceModelNormalDebugCameraAngles
+    if origin and angles then
+        draw.SimpleText(string.format("camera origin %.0f %.0f %.0f | angles %.0f %.0f %.0f",
+            origin.x, origin.y, origin.z, angles.p, angles.y, angles.r),
+            "DermaDefault", panelX + 10, statusY + 15, Color(190, 210, 230))
+    else
+        draw.SimpleText("camera: capture pass not active",
+            "DermaDefault", panelX + 10, statusY + 15, Color(190, 210, 230))
+    end
+
+    if NKM.GShaderSourceModelNormalDebugUpdatedAt then
+        draw.SimpleText(string.format("buffer updated %.2fs ago",
+            math.max(0, RealTime() - NKM.GShaderSourceModelNormalDebugUpdatedAt)),
+            "DermaDefault", panelX + 10, statusY + 30, Color(190, 210, 230))
+    end
+
+    local debugError = NKM.GShaderSourceModelNormalDebugLastError
+        or NKM.GShaderSourceModelNormalLastError
+    if debugError then
+        draw.SimpleText("error: " .. string.sub(tostring(debugError), 1, 82),
+            "DermaDefault", panelX + 10, panelY + panelHeight - 18,
+            Color(255, 115, 105))
     end
 end)
 
@@ -3357,8 +3553,12 @@ concommand.Add("nkm_gshader_status", function()
         .. "; shaderCompiled=" .. tostring(sourceModelNormalShaderReady)
         .. "; passReady=" .. tostring(NKM.GShaderSourceModelNormalPassReady == true)
         .. "; entitiesDrawn=" .. tostring(NKM.GShaderSourceModelNormalDraws or 0)
+        .. "; debugPanel=" .. tostring(NKM_GShaderSourceModelNormalsDebugConVar:GetBool())
+        .. "; decodedDebugBuffer=" .. tostring(NKM_GShaderSourceModelNormalDecodedRT ~= nil)
         .. (NKM.GShaderSourceModelNormalLastError
-            and ("; error=" .. tostring(NKM.GShaderSourceModelNormalLastError)) or ""))
+            and ("; error=" .. tostring(NKM.GShaderSourceModelNormalLastError)) or "")
+        .. (NKM.GShaderSourceModelNormalDebugLastError
+            and ("; debugError=" .. tostring(NKM.GShaderSourceModelNormalDebugLastError)) or ""))
     if NKM.GShaderLUTLastError then print("[NKM] LUT error: " .. tostring(NKM.GShaderLUTLastError)) end
     if NKM.GShaderLastError then print("[NKM] Last error: " .. tostring(NKM.GShaderLastError)) end
 end)
