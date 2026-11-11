@@ -1243,7 +1243,7 @@ local function ensureNKMNormalDecodeDebugResources(width, height, flags)
     if not NKM_GShaderVertexNormalDecodeMaterial then
         local materialOK, material = pcall(CreateMaterial, "nkm_gshader_vertex_normal_decode_debug",
             "screenspace_general", {
-                ["$pixshader"] = "wn_tangetns_decode_ps30",
+                ["$pixshader"] = "nkm_source_model_normal_visualize_ps30",
                 ["$vertexshader"] = "pp_vs30",
                 ["$basetexture"] = "_rt_NKM_VertexNormals",
                 ["$no_fullbright"] = "1",
@@ -1562,7 +1562,7 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
                     NKM.GShaderSourceModelNormalDebugLastError = nil
                 else
                     NKM.GShaderSourceModelNormalDebugLastError =
-                        "wn_tangetns_decode_ps30 is unavailable for the debug view"
+                        "nkm_source_model_normal_visualize_ps30 is not compiled/available for the debug view"
                 end
             else
                 NKM.GShaderSourceModelNormalDebugLastError =
@@ -2234,6 +2234,8 @@ local function drawNKMDecodedSourceModelNormalBuffer()
     local pushedTarget, cameraStarted = false, false
     local ok, err = pcall(function()
         material:SetTexture("$basetexture", source)
+        material:SetFloat("$c4_x", 1 / math.max(source:Width(), 1))
+        material:SetFloat("$c4_y", 1 / math.max(source:Height(), 1))
         render.PushRenderTarget(target)
         pushedTarget = true
         render.Clear(0, 0, 0, 0, false, false)
