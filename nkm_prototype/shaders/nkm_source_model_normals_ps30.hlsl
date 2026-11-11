@@ -31,8 +31,12 @@ float4 main(PS_INPUT input) : COLOR0
 
     float sceneDepth = tex2Dlod(SourceWorldPositionBuffer, float4(uv, 0, 0)).a;
     float expectedDepth = 1.0 / max(input.clipW, 0.0001);
-    float relativeDepthDelta = abs(sceneDepth - expectedDepth)
+    // Both values are reciprocal linear view depth: larger means nearer.
+    // Positive signed delta means the scene buffer has a nearer occluder;
+    // negative means it reports a surface farther away than this model fragment.
+    float signedRelativeDepthDelta = (sceneDepth - expectedDepth)
         / max(expectedDepth, 0.00025);
+    float relativeDepthDelta = abs(signedRelativeDepthDelta);
     float depthTolerance = max(ModelNormalParams.z, 0.0005);
     bool hasSceneDepth = sceneDepth > 0.00025;
     bool depthMismatch = !hasSceneDepth || relativeDepthDelta > depthTolerance;
@@ -60,10 +64,16 @@ float4 main(PS_INPUT input) : COLOR0
 
     if (ModelNormalParams.w >= 2.5)
     {
-        // Green = strict depth match; yellow = depth mismatch; red = no
-        // GShader scene depth. Pixels outside the geometry remain clear/black.
+        // Green = depth match. Orange = the sampled scene surface is nearer
+        // than this prop (normally a foreground occluder, e.g. a jumping player).
+        // Blue = the scene buffer reports a farther surface than this fragment,
+        // which suggests screen/depth registration or reconstruction mismatch.
+        // Red = no GShader depth; black = outside candidate model coverage.
         if (!hasSceneDepth) return float4(1.0, 0.0, 0.0, 1.0);
-        if (depthMismatch) return float4(1.0, 0.75, 0.0, 1.0);
+        if (signedRelativeDepthDelta > depthTolerance)
+            return float4(1.0, 0.45, 0.0, 1.0);
+        if (signedRelativeDepthDelta < -depthTolerance)
+            return float4(0.0, 0.35, 1.0, 1.0);
         return float4(0.0, 1.0, 0.0, 1.0);
     }
 
