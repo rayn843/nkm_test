@@ -1047,6 +1047,8 @@ local NKM_GShaderSourceModelNormalRejectMaskRT
 local NKM_GShaderSourceModelNormalMaterial
 local NKM_GShaderSourceModelNormalDecodedRT
 local NKM_GShaderSourceModelNormalDecodeMaterial
+local NKM_GShaderSourceModelLightFacingDebugRT
+local NKM_GShaderSourceModelLightFacingDebugMaterial
 local NKM_GShaderDecodedWorldPosRT
 local NKM_GShaderWorldPosDebugMaterial
 local NKM_GShaderWorldPosSampler2RT
@@ -1567,6 +1569,52 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
             else
                 NKM.GShaderSourceModelNormalDebugLastError =
                     tostring(material or "Source model-normal decode material creation failed")
+            end
+        end
+
+        local facingReady = NKM_GShaderSourceModelLightFacingDebugRT
+            and NKM_GShaderSourceModelLightFacingDebugRT:Width() == width
+            and NKM_GShaderSourceModelLightFacingDebugRT:Height() == height
+        if not facingReady then
+            local targetOK, target = pcall(GetRenderTargetEx,
+                "_rt_NKM_SourceModelLightFacingDebug", width, height, RT_SIZE_FULL_FRAME_BUFFER,
+                MATERIAL_RT_DEPTH_NONE, flags, 0, IMAGE_FORMAT_RGBA8888)
+            NKM_GShaderSourceModelLightFacingDebugRT = targetOK and target or nil
+            if not NKM_GShaderSourceModelLightFacingDebugRT then
+                NKM.GShaderSourceModelLightFacingDebugError =
+                    tostring(target or "Source model light-facing debug RT creation failed")
+            else
+                NKM.GShaderSourceModelLightFacingDebugError = nil
+            end
+        end
+
+        if not NKM_GShaderSourceModelLightFacingDebugMaterial then
+            local materialOK, material = pcall(CreateMaterial,
+                "nkm_gshader_source_model_light_facing_debug", "screenspace_general", {
+                    ["$pixshader"] = "nkm_source_model_light_facing_debug_ps30",
+                    ["$vertexshader"] = "pp_vs30",
+                    ["$basetexture"] = "_rt_WPDepth",
+                    ["$texture1"] = "_rt_NKM_SourceModelNormals",
+                    ["$texture2"] = "_rt_NKM_DynamicLights",
+                    ["$no_fullbright"] = "1",
+                    ["$ignorez"] = "1",
+                    ["$VERTEXTRANSFORM"] = "1",
+                    ["$WRITEALPHA"] = "1",
+                    ["$copyalpha"] = "1",
+                    ["$vertexalpha"] = "1"
+                })
+            if materialOK and material then
+                local errorOK, isError = pcall(material.IsError, material)
+                if errorOK and not isError then
+                    NKM_GShaderSourceModelLightFacingDebugMaterial = material
+                    NKM.GShaderSourceModelLightFacingDebugError = nil
+                else
+                    NKM.GShaderSourceModelLightFacingDebugError =
+                        "nkm_source_model_light_facing_debug_ps30 is not compiled/available"
+                end
+            else
+                NKM.GShaderSourceModelLightFacingDebugError =
+                    tostring(material or "Source model light-facing debug material creation failed")
             end
         end
     end
@@ -2210,6 +2258,11 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         if not depthDebugOK then
             NKM.GShaderSourceModelNormalDepthDebugError = tostring(depthDebugError)
         end
+
+        local facingDebugOK, facingDebugError = drawNKMSourceModelLightFacingDebug()
+        if not facingDebugOK then
+            NKM.GShaderSourceModelLightFacingDebugError = tostring(facingDebugError)
+        end
     end
 
     if not ok then return false, tostring(err), drawnModels end
@@ -2249,6 +2302,49 @@ local function drawNKMDecodedSourceModelNormalBuffer()
     if cameraStarted then pcall(cam.End2D) end
     if pushedTarget then pcall(render.PopRenderTarget) end
     if not ok then return false, tostring(err) end
+    return true
+end
+
+local function drawNKMSourceModelLightFacingDebug()
+    if not NKM_GShaderSourceModelNormalsDebugConVar:GetBool() then return true end
+
+    local target = NKM_GShaderSourceModelLightFacingDebugRT
+    local material = NKM_GShaderSourceModelLightFacingDebugMaterial
+    local sourceWorldPosition = shaderlib.rt_WPDepth
+    if not target then return false, "Source model light-facing debug RT is unavailable" end
+    if not sourceWorldPosition then return false, "GShader Source world-position buffer is unavailable" end
+    if not material or material:IsError() then
+        return false, "nkm_source_model_light_facing_debug_ps30 is not compiled/available"
+    end
+    if not updateGShaderDynamicLightLUT() or not NKM.GShaderDynamicLightLUT then
+        return false, NKM.GShaderLUTLastError or "dynamic-light LUT is unavailable"
+    end
+
+    local pushedTarget, cameraStarted = false, false
+    local ok, err = pcall(function()
+        material:SetTexture("$basetexture", sourceWorldPosition)
+        material:SetTexture("$texture1", NKM_GShaderSourceModelNormalRT)
+        material:SetTexture("$texture2", NKM.GShaderDynamicLightLUT)
+        material:SetFloat("$c0_x", #((NKM.ClientDynamicLights) or {}))
+
+        render.PushRenderTarget(target)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, false, false)
+        cam.Start2D()
+        cameraStarted = true
+        render.SetMaterial(material)
+        render.DrawScreenQuad()
+        cam.End2D()
+        cameraStarted = false
+    end)
+    if cameraStarted then pcall(cam.End2D) end
+    if pushedTarget then pcall(render.PopRenderTarget) end
+    if not ok then
+        NKM.GShaderSourceModelLightFacingDebugError = tostring(err)
+        return false, tostring(err)
+    end
+
+    NKM.GShaderSourceModelLightFacingDebugError = nil
     return true
 end
 
@@ -2786,7 +2882,7 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     local panelWidth = math.min(1100, ScrW() - 24)
     local panelX = ScrW() - panelWidth - 12
     local panelY = 12
-    local previewWidth = math.max(1, math.floor((panelWidth - 52) / 5))
+    local previewWidth = math.max(1, math.floor((panelWidth - 60) / 6))
     local previewHeight = previewWidth * ScrH() / math.max(ScrW(), 1)
     local previewY = panelY + 32
     local panelHeight = math.max(292, previewHeight + 174)
@@ -2803,7 +2899,8 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
         { title = "UNGATED RAW", target = NKM_GShaderSourceModelNormalUngatedDebugRT },
         { title = "DECODED STRICT", target = NKM_GShaderSourceModelNormalDecodedRT },
         { title = "DEPTH DELTA", target = NKM_GShaderSourceModelNormalDepthDeltaRT },
-        { title = "REJECT MASK", target = NKM_GShaderSourceModelNormalRejectMaskRT }
+        { title = "REJECT MASK", target = NKM_GShaderSourceModelNormalRejectMaskRT },
+        { title = "N DOT L", target = NKM_GShaderSourceModelLightFacingDebugRT }
     }
     for index, preview in ipairs(previews) do
         local previewX = panelX + 10 + (index - 1) * (previewWidth + 8)
@@ -2882,7 +2979,8 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
             "DermaDefault", panelX + 10, statusY + 45, Color(190, 210, 230))
     end
 
-    local debugError = NKM.GShaderSourceModelNormalDepthDebugError
+    local debugError = NKM.GShaderSourceModelLightFacingDebugError
+        or NKM.GShaderSourceModelNormalDepthDebugError
         or NKM.GShaderSourceModelNormalUngatedDebugError
         or NKM.GShaderSourceModelNormalDebugLastError
         or NKM.GShaderSourceModelNormalLastError
