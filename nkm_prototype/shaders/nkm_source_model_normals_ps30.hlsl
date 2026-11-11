@@ -1,5 +1,5 @@
-// Writes interpolated, bone-skinned Source vertex normals only where this
-// model fragment matches the visible Source scene depth at the same pixel.
+// Captures skinned Source vertex normals and exposes depth-match diagnostics.
+// c0.w: 0=strict normal, 1=ungated normal, 2=depth delta view, 3=reject mask.
 sampler SourceWorldPositionBuffer : register(s0); // GShader _rt_WPDepth
 const float4 ModelNormalParams : register(c0); // xy=inverse RT size, z=relative depth tolerance
 
@@ -34,12 +34,42 @@ float4 main(PS_INPUT input) : COLOR0
     float relativeDepthDelta = abs(sceneDepth - expectedDepth)
         / max(expectedDepth, 0.00025);
     float depthTolerance = max(ModelNormalParams.z, 0.0005);
+    bool hasSceneDepth = sceneDepth > 0.00025;
+    bool depthMismatch = !hasSceneDepth || relativeDepthDelta > depthTolerance;
 
-    // Strict capture rejects hidden/mismatched fragments. Debug c0.w=1 bypasses
-    // only this comparison to reveal whether the missing RAW pixels originate
-    // in scene-depth registration or earlier in model rasterization/normal data.
-    if (ModelNormalParams.w < 0.5
-        && (sceneDepth <= 0.00025 || relativeDepthDelta > depthTolerance))
+    // Diagnostic modes run before strict rejection. They use the same model
+    // rasterization and sampled scene depth as the normal capture pass.
+    if (ModelNormalParams.w > 1.5 && ModelNormalParams.w < 2.5)
+    {
+        // Blue -> cyan -> red maps 0 .. 4x tolerance. Magenta means that the
+        // GShader world-position buffer contains no scene depth at this pixel.
+        if (!hasSceneDepth)
+            return float4(1.0, 0.0, 1.0, 1.0);
+
+        float deltaScale = saturate(relativeDepthDelta
+            / max(depthTolerance * 4.0, 0.002));
+        float3 deltaColor;
+        if (deltaScale < 0.5)
+            deltaColor = lerp(float3(0.0, 0.0, 0.35),
+                float3(0.0, 0.9, 1.0), deltaScale * 2.0);
+        else
+            deltaColor = lerp(float3(0.0, 0.9, 1.0),
+                float3(1.0, 0.05, 0.0), (deltaScale - 0.5) * 2.0);
+        return float4(deltaColor, 1.0);
+    }
+
+    if (ModelNormalParams.w >= 2.5)
+    {
+        // Green = strict depth match; yellow = depth mismatch; red = no
+        // GShader scene depth. Pixels outside the geometry remain clear/black.
+        if (!hasSceneDepth) return float4(1.0, 0.0, 0.0, 1.0);
+        if (depthMismatch) return float4(1.0, 0.75, 0.0, 1.0);
+        return float4(0.0, 1.0, 0.0, 1.0);
+    }
+
+    // Strict capture rejects hidden/mismatched fragments. c0.w=1 bypasses
+    // only this comparison to create the ungated normal diagnostic.
+    if (ModelNormalParams.w < 0.5 && depthMismatch)
         clip(-1.0);
 
     float3 normal = normalize(input.worldNormal);
