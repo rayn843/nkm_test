@@ -1499,15 +1499,15 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
 
     if not NKM_GShaderSourceModelBumpHiddenMaterial then
         -- Every model material slot except the one currently being captured
-        -- must be fully transparent and must not write depth. An opaque or
-        -- alpha-tested "hidden" material redraws the whole model for every slot,
-        -- causing competing depth/normal samples on multi-material props.
+        -- must be discarded before color/depth writes. The capture pass forces depth
+        -- writes for the active slot, so a merely translucent hidden material
+        -- is insufficient; alpha=0 plus alpha-test guarantees no hidden fragments.
         local hiddenOK, hidden = pcall(CreateMaterial,
-            "nkm_source_model_bump_hidden_translucent", "UnlitGeneric", {
+            "nkm_source_model_bump_hidden_alphatest", "UnlitGeneric", {
                 ["$basetexture"] = "color/white",
-                ["$translucent"] = "1",
                 ["$alpha"] = "0",
-                ["$vertexalpha"] = "1",
+                ["$alphatest"] = "1",
+                ["$alphatestreference"] = "0.5",
                 ["$nocull"] = "1"
             })
         if hiddenOK and hidden then
