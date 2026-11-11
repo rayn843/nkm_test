@@ -2334,6 +2334,12 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         return false, NKM.GShaderSourceModelNormalLastError, 0
     end
 
+    if not viewSetup then
+        NKM.GShaderSourceModelNormalPassReady = false
+        NKM.GShaderSourceModelNormalLastError = "Source model bump pass has no view setup"
+        return false, NKM.GShaderSourceModelNormalLastError, 0
+    end
+
     local material = NKM_GShaderSourceModelBumpMaterial
     local hiddenMaterial = NKM_GShaderSourceModelBumpHiddenMaterial
     local sourceWorldPosition = shaderlib.rt_WPDepth
@@ -2348,7 +2354,6 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     local width, height = ScrW(), ScrH()
 
     local ok, err = pcall(function()
-        if not viewSetup then error("Source model bump pass has no view setup") end
         if not sourceWorldPosition then error("GShader Source world-position buffer is unavailable") end
         if not isfunction(render.MaterialOverrideByIndex) then
             error("render.MaterialOverrideByIndex is unavailable")
@@ -3173,10 +3178,10 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     local entityPassEnabled = NKM_GShaderEntityLightingConVar:GetBool()
     local passReady = NKM.GShaderSourceModelNormalPassReady == true
     local shaderReady = false
-    if NKM_GShaderSourceModelNormalMaterial then
+    if NKM_GShaderSourceModelBumpMaterial then
         local shaderOK, isError = pcall(
-            NKM_GShaderSourceModelNormalMaterial.IsError,
-            NKM_GShaderSourceModelNormalMaterial)
+            NKM_GShaderSourceModelBumpMaterial.IsError,
+            NKM_GShaderSourceModelBumpMaterial)
         shaderReady = shaderOK and not isError
     end
 
@@ -3189,7 +3194,7 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
         [2] = "Z test/write, no cull",
         [3] = "Z test, no write/cull"
     }
-    draw.SimpleText(string.format("capture=%s entity=%s pass=%s shader=%s strict=%d raster=%s",
+    draw.SimpleText(string.format("capture=%s entity=%s pass=%s shader=%s bumpSlots=%d raster=%s",
         tostring(captureEnabled), tostring(entityPassEnabled), tostring(passReady),
         tostring(shaderReady), NKM.GShaderSourceModelNormalDraws or 0,
         rasterLabels[rasterMode] or "unknown"),
