@@ -103,7 +103,7 @@ local NKM_GShaderSourceNormalSmoothingConVar = CreateClientConVar(
 )
 local NKM_GShaderSourceModelNormalsConVar = CreateClientConVar(
     "nkm_gshader_source_model_normals", "0", true, false,
-    "Use skinned vertex normals for compatible opaque engine models; players, NPCs and scripted entities use depth-reconstructed normals."
+    "Use per-material tangent-space bump maps for compatible opaque Source models, players and NPCs."
 )
 local NKM_GShaderSourceModelNormalsDebugConVar = CreateClientConVar(
     "nkm_gshader_source_model_normals_debug", "0", true, false,
@@ -1045,6 +1045,9 @@ local NKM_GShaderSourceModelNormalUngatedDebugRT
 local NKM_GShaderSourceModelNormalDepthDeltaRT
 local NKM_GShaderSourceModelNormalRejectMaskRT
 local NKM_GShaderSourceModelNormalMaterial
+local NKM_GShaderSourceModelBumpMaterial
+local NKM_GShaderSourceModelBumpHiddenMaterial
+local NKM_GShaderPlayerBumpCaptureModels = {}
 local NKM_GShaderSourceModelNormalDecodedRT
 local NKM_GShaderSourceModelNormalDecodeMaterial
 local NKM_GShaderSourceModelLightFacingDebugRT
@@ -1473,12 +1476,37 @@ local function ensureNKMSourceModelNormalResources(width, height, flags)
             local errorOK, isError = pcall(material.IsError, material)
             if errorOK and not isError then
                 NKM_GShaderSourceModelNormalMaterial = material
+            end
+        end
+    end
+
+    if not NKM_GShaderSourceModelBumpMaterial then
+        local materialOK, material = pcall(Material, "pp/nkm_source_model_bumps")
+        if materialOK and material then
+            local errorOK, isError = pcall(material.IsError, material)
+            if errorOK and not isError then
+                NKM_GShaderSourceModelBumpMaterial = material
                 NKM.GShaderSourceModelNormalLastError = nil
             elseif NKM_GShaderSourceModelNormalsConVar:GetBool() then
-                NKM.GShaderSourceModelNormalLastError = "nkm_source_model_normals_ps30/vs30 is not compiled/available"
+                NKM.GShaderSourceModelNormalLastError =
+                    "nkm_source_model_bump_ps30/vs30 is not compiled/available"
             end
         elseif NKM_GShaderSourceModelNormalsConVar:GetBool() then
-            NKM.GShaderSourceModelNormalLastError = tostring(material or "Source model-normal material is unavailable")
+            NKM.GShaderSourceModelNormalLastError =
+                tostring(material or "Source model bump-capture material is unavailable")
+        end
+    end
+
+    if not NKM_GShaderSourceModelBumpHiddenMaterial then
+        local hiddenOK, hidden = pcall(CreateMaterial,
+            "nkm_source_model_bump_hidden", "UnlitGeneric", {
+                ["$basetexture"] = "color/white",
+                ["$alphatest"] = "1",
+                ["$alphatestreference"] = "1.0",
+                ["$nocull"] = "1"
+            })
+        if hiddenOK and hidden then
+            NKM_GShaderSourceModelBumpHiddenMaterial = hidden
         end
     end
 
@@ -2090,13 +2118,167 @@ end
 
 local drawNKMSourceModelLightFacingDebug
 
+local function getSourceBumpMaterial(entity, materialNames, materialIndex)
+    local materialName = ""
+    local globalOverride = entity:GetMaterial()
+    if isstring(globalOverride) and globalOverride ~= "" then
+        materialName = globalOverride
+    else
+        local subMaterial = entity:GetSubMaterial(materialIndex)
+        if isstring(subMaterial) and subMaterial ~= "" then
+            materialName = subMaterial
+        else
+            materialName = materialNames[materialIndex + 1] or ""
+        end
+    end
+
+    if not isstring(materialName) or materialName == "" then return nil end
+    if string.sub(materialName, 1, 1) == "!" then
+        materialName = string.sub(materialName, 2)
+    end
+
+    local materialOK, sourceMaterial = pcall(Material, materialName)
+    if not materialOK or not sourceMaterial then return nil end
+    local sourceErrorOK, sourceIsError = pcall(sourceMaterial.IsError, sourceMaterial)
+    if not sourceErrorOK or sourceIsError then return nil end
+
+    local ssbumpOK, isSSBump = pcall(sourceMaterial.GetInt, sourceMaterial, "$ssbump")
+    if ssbumpOK and isSSBump and isSSBump > 0 then return nil end
+
+    local bumpOK, bumpTexture = pcall(sourceMaterial.GetTexture, sourceMaterial, "$bumpmap")
+    if not bumpOK or not bumpTexture then return nil end
+    local bumpErrorOK, bumpIsError = pcall(function()
+        if isfunction(bumpTexture.IsError) then return bumpTexture:IsError() end
+        if isfunction(bumpTexture.IsErrorTexture) then return bumpTexture:IsErrorTexture() end
+        return false
+    end)
+    if not bumpErrorOK or bumpIsError then return nil end
+
+    local decodeMode = 0 -- RGB normal map
+    local formatOK, imageFormat = pcall(bumpTexture.GetImageFormat, bumpTexture)
+    if formatOK then
+        if IMAGE_FORMAT_ATI2N and imageFormat == IMAGE_FORMAT_ATI2N then
+            decodeMode = 2 -- two-channel ATI2N
+        elseif IMAGE_FORMAT_DXT5 and imageFormat == IMAGE_FORMAT_DXT5 then
+            decodeMode = 1 -- Source DXT5nm: X in A, Y in G
+        end
+    end
+
+    local transform = { 1, 0, 0, 0, 0, 1, 0, 0 }
+    local transformOK, bumpTransform = pcall(sourceMaterial.GetMatrix, sourceMaterial, "$bumptransform")
+    if transformOK and bumpTransform then
+        local fields = {}
+        for row = 1, 2 do
+            for column = 1, 4 do
+                local fieldOK, value = pcall(bumpTransform.GetField, bumpTransform, row, column)
+                local fallback = transform[#fields + 1]
+                fields[#fields + 1] = fieldOK and isFiniteNumber(value) and value or fallback
+            end
+        end
+        transform = fields
+    end
+
+    return {
+        texture = bumpTexture,
+        decodeMode = decodeMode,
+        transform = transform
+    }
+end
+
+local function syncSourceAnimatedBumpClone(sourceEntity)
+    if not IsValid(sourceEntity) then return nil end
+    local modelPath = sourceEntity:GetModel()
+    if not isstring(modelPath) or modelPath == "" or string.sub(modelPath, 1, 1) == "*" then return nil end
+
+    local cache = NKM_GShaderPlayerBumpCaptureModels[sourceEntity]
+    if cache and (not IsValid(cache.model) or cache.modelPath ~= modelPath) then
+        if IsValid(cache.model) then cache.model:Remove() end
+        NKM_GShaderPlayerBumpCaptureModels[sourceEntity] = nil
+        cache = nil
+    end
+
+    if not cache then
+        local cloneOK, clone = pcall(ClientsideModel, modelPath, RENDERGROUP_OPAQUE)
+        if not cloneOK or not IsValid(clone) then return nil end
+        clone:SetNoDraw(true)
+        cache = { model = clone, modelPath = modelPath }
+        NKM_GShaderPlayerBumpCaptureModels[sourceEntity] = cache
+    end
+
+    local clone = cache.model
+    local syncOK = pcall(function()
+        clone:SetNoDraw(true)
+        clone:SetPos(sourceEntity:GetPos())
+        clone:SetAngles(sourceEntity:GetAngles())
+        clone:SetRenderMode(RENDERMODE_NORMAL)
+        clone:SetColor(sourceEntity:GetColor())
+        clone:SetSkin(sourceEntity:GetSkin())
+        clone:SetModelScale(sourceEntity:GetModelScale(), 0)
+
+        local bodygroupCount = sourceEntity:GetNumBodyGroups()
+        for bodygroup = 0, bodygroupCount - 1 do
+            clone:SetBodygroup(bodygroup, sourceEntity:GetBodygroup(bodygroup))
+        end
+
+        local globalMaterial = sourceEntity:GetMaterial()
+        clone:SetMaterial(isstring(globalMaterial) and globalMaterial or "")
+        for materialIndex = 0, 31 do
+            local subMaterial = sourceEntity:GetSubMaterial(materialIndex)
+            clone:SetSubMaterial(materialIndex,
+                isstring(subMaterial) and subMaterial ~= "" and subMaterial or nil)
+        end
+
+        if isfunction(sourceEntity.SetupBones) then sourceEntity:SetupBones() end
+        clone:SetupBones()
+
+        local boneCount = math.min(sourceEntity:GetBoneCount(), clone:GetBoneCount())
+        for boneIndex = 0, boneCount - 1 do
+            local boneMatrix = sourceEntity:GetBoneMatrix(boneIndex)
+            if boneMatrix then clone:SetBoneMatrix(boneIndex, boneMatrix) end
+        end
+
+        if isfunction(sourceEntity.GetFlexNum)
+            and isfunction(sourceEntity.GetFlexWeight)
+            and isfunction(clone.SetFlexWeight) then
+            local flexCount = sourceEntity:GetFlexNum()
+            for flexIndex = 0, flexCount - 1 do
+                clone:SetFlexWeight(flexIndex, sourceEntity:GetFlexWeight(flexIndex))
+            end
+        end
+    end)
+
+    return syncOK and clone or nil
+end
+
+local function isSourceAnimatedBumpCandidate(entity)
+    if not IsValid(entity) or entity:IsWorld() or entity:GetNoDraw() then return false end
+    if entity:GetRenderMode() ~= RENDERMODE_NORMAL then return false end
+    local isPlayer = isfunction(entity.IsPlayer) and entity:IsPlayer()
+    local isNPC = isfunction(entity.IsNPC) and entity:IsNPC()
+    if not isPlayer and not isNPC then return false end
+
+    if scripted_ents and isfunction(scripted_ents.GetStored) then
+        local storedOK, stored = pcall(scripted_ents.GetStored, entity:GetClass())
+        if storedOK and istable(stored) then return false end
+    end
+    local overrideOK, renderOverride = pcall(function() return entity.RenderOverride end)
+    if overrideOK and isfunction(renderOverride) then return false end
+
+    local renderGroup = entity:GetRenderGroup()
+    if renderGroup ~= RENDERGROUP_OPAQUE
+        and renderGroup ~= RENDERGROUP_OPAQUE_HUGE
+        and renderGroup ~= RENDERGROUP_BOTH then
+        return false
+    end
+    if isfunction(entity.IsDormant) and entity:IsDormant() then return false end
+    return true
+end
+
 local function drawNKMSourceModelNormalBuffer(viewSetup)
     local enabled = NKM_GShaderSourceModelNormalsConVar:GetBool()
         and NKM_GShaderEntityLightingConVar:GetBool()
     local target = NKM_GShaderSourceModelNormalRT
     if not enabled then
-        -- Do not leave a previous frame's capture visible in the debug view or
-        -- available for accidental sampling after the feature is switched off.
         if target then
             local pushedTarget = false
             local clearOK, clearError = pcall(function()
@@ -2152,7 +2334,8 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         return false, NKM.GShaderSourceModelNormalLastError, 0
     end
 
-    local material = NKM_GShaderSourceModelNormalMaterial
+    local material = NKM_GShaderSourceModelBumpMaterial
+    local hiddenMaterial = NKM_GShaderSourceModelBumpHiddenMaterial
     local sourceWorldPosition = shaderlib.rt_WPDepth
     NKM.GShaderSourceModelNormalDebugCameraOrigin = Vector(
         viewSetup.origin.x, viewSetup.origin.y, viewSetup.origin.z)
@@ -2160,27 +2343,31 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         viewSetup.angles.p, viewSetup.angles.y, viewSetup.angles.r)
     NKM.GShaderSourceModelNormalDebugUpdatedAt = RealTime()
     local pushedTarget, cameraStarted = false, false
-    local drawnModels, failedModels = 0, 0
+    local bumpDraws, failedModels = 0, 0
     local nearestEntity, nearestDistanceSqr = nil, nil
     local width, height = ScrW(), ScrH()
 
     local ok, err = pcall(function()
-        render.PushRenderTarget(target)
-        pushedTarget = true
-        render.Clear(0, 0, 0, 0, true, true)
-
-        if not enabled then return end
-        if not viewSetup then error("Source model-normal pass has no view setup") end
+        if not viewSetup then error("Source model bump pass has no view setup") end
         if not sourceWorldPosition then error("GShader Source world-position buffer is unavailable") end
+        if not isfunction(render.MaterialOverrideByIndex) then
+            error("render.MaterialOverrideByIndex is unavailable")
+        end
         if not material or material:IsError() then
-            error("nkm_source_model_normals_ps30/vs30 is not compiled/available")
+            error("nkm_source_model_bump_ps30/vs30 is not compiled/available")
+        end
+        if not hiddenMaterial or hiddenMaterial:IsError() then
+            error("Source model bump hidden material is unavailable")
         end
 
         material:SetTexture("$basetexture", sourceWorldPosition)
         material:SetFloat("$c0_x", 1 / math.max(width, 1))
         material:SetFloat("$c0_y", 1 / math.max(height, 1))
         material:SetFloat("$c0_z", 0.006)
-        material:SetFloat("$c0_w", 0)
+
+        render.PushRenderTarget(target)
+        pushedTarget = true
+        render.Clear(0, 0, 0, 0, true, true)
 
         cam.Start3D(viewSetup.origin, viewSetup.angles, viewSetup.fov,
             0, 0, width, height, viewSetup.znear or 1, viewSetup.zfar or 32768)
@@ -2189,22 +2376,79 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         render.OverrideDepthEnable(true, true)
         render.SetBlend(1)
         render.SetColorModulation(1, 1, 1)
-        render.MaterialOverride(material)
+        render.MaterialOverride(nil)
 
-        local localPlayer = LocalPlayer()
+        for sourceEntity, cache in pairs(NKM_GShaderPlayerBumpCaptureModels) do
+            if not IsValid(sourceEntity) then
+                if cache and IsValid(cache.model) then cache.model:Remove() end
+                NKM_GShaderPlayerBumpCaptureModels[sourceEntity] = nil
+            end
+        end
+
+        local function captureEntityMaterials(sourceEntity, drawEntity)
+            local materialNames = sourceEntity:GetMaterials() or {}
+            if #materialNames == 0 or #materialNames > 32 then return end
+
+            for materialIndex = 0, 31 do
+                render.MaterialOverrideByIndex(materialIndex, hiddenMaterial)
+            end
+
+            local capturedForEntity = 0
+            for materialIndex = 0, math.min(#materialNames, 32) - 1 do
+                local bumpData = getSourceBumpMaterial(sourceEntity, materialNames, materialIndex)
+                if bumpData then
+                    material:SetTexture("$texture1", bumpData.texture)
+                    material:SetFloat("$c1_x", bumpData.decodeMode)
+                    local transform = bumpData.transform
+                    material:SetFloat("$c2_x", transform[1])
+                    material:SetFloat("$c2_y", transform[2])
+                    material:SetFloat("$c2_z", transform[3])
+                    material:SetFloat("$c2_w", transform[4])
+                    material:SetFloat("$c3_x", transform[5])
+                    material:SetFloat("$c3_y", transform[6])
+                    material:SetFloat("$c3_z", transform[7])
+                    material:SetFloat("$c3_w", transform[8])
+
+                    render.MaterialOverrideByIndex(materialIndex, material)
+                    local drawOK = pcall(function() drawEntity:DrawModel() end)
+                    render.MaterialOverrideByIndex(materialIndex, hiddenMaterial)
+                    if drawOK then
+                        capturedForEntity = capturedForEntity + 1
+                        bumpDraws = bumpDraws + 1
+                    else
+                        failedModels = failedModels + 1
+                    end
+                end
+            end
+
+            render.MaterialOverrideByIndex()
+            if capturedForEntity > 0 then
+                local delta = sourceEntity:GetPos() - viewSetup.origin
+                local distanceSqr = delta:LengthSqr()
+                if not nearestDistanceSqr or distanceSqr < nearestDistanceSqr then
+                    nearestEntity = sourceEntity
+                    nearestDistanceSqr = distanceSqr
+                end
+            end
+        end
+
         for _, entity in ipairs(ents.GetAll()) do
-            if isSourceModelNormalCandidate(entity, localPlayer) then
+            if isSourceModelNormalCandidate(entity, LocalPlayer()) then
                 local drawOK = pcall(function()
                     if isfunction(entity.SetupBones) then entity:SetupBones() end
-                    entity:DrawModel()
+                    captureEntityMaterials(entity, entity)
                 end)
-                if drawOK then
-                    drawnModels = drawnModels + 1
-                    local delta = entity:GetPos() - viewSetup.origin
-                    local distanceSqr = delta:LengthSqr()
-                    if not nearestDistanceSqr or distanceSqr < nearestDistanceSqr then
-                        nearestEntity = entity
-                        nearestDistanceSqr = distanceSqr
+                if not drawOK then
+                    failedModels = failedModels + 1
+                    render.MaterialOverrideByIndex()
+                end
+            elseif isSourceAnimatedBumpCandidate(entity) then
+                local clone = syncSourceAnimatedBumpClone(entity)
+                if IsValid(clone) then
+                    local drawOK = pcall(function() captureEntityMaterials(entity, clone) end)
+                    if not drawOK then
+                        failedModels = failedModels + 1
+                        render.MaterialOverrideByIndex()
                     end
                 else
                     failedModels = failedModels + 1
@@ -2212,7 +2456,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
             end
         end
 
-        render.MaterialOverride(nil)
+        render.MaterialOverrideByIndex()
         render.OverrideDepthEnable(false, false)
         render.CullMode(MATERIAL_CULLMODE_CCW)
         render.SetColorModulation(1, 1, 1)
@@ -2222,6 +2466,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     end)
 
     render.MaterialOverride(nil)
+    if isfunction(render.MaterialOverrideByIndex) then pcall(render.MaterialOverrideByIndex) end
     render.OverrideDepthEnable(false, false)
     render.CullMode(MATERIAL_CULLMODE_CCW)
     render.SetColorModulation(1, 1, 1)
@@ -2229,7 +2474,7 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
     if cameraStarted then pcall(cam.End3D) end
     if pushedTarget then pcall(render.PopRenderTarget) end
 
-    NKM.GShaderSourceModelNormalDraws = drawnModels
+    NKM.GShaderSourceModelNormalDraws = bumpDraws
     NKM.GShaderSourceModelNormalDebugEntityInfo = nil
     if IsValid(nearestEntity) then
         local infoOK, info = pcall(function()
@@ -2245,16 +2490,13 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         end)
         if infoOK then NKM.GShaderSourceModelNormalDebugEntityInfo = info end
     end
-    if not enabled then
-        NKM.GShaderSourceModelNormalPassReady = false
-        NKM.GShaderSourceModelNormalLastError = nil
-    elseif not ok then
+    if not ok then
         NKM.GShaderSourceModelNormalPassReady = false
         NKM.GShaderSourceModelNormalLastError = tostring(err)
     else
         NKM.GShaderSourceModelNormalPassReady = true
         NKM.GShaderSourceModelNormalLastError = failedModels > 0
-            and (tostring(failedModels) .. " Source model(s) failed to draw in the normal pass")
+            and (tostring(failedModels) .. " model/material bump draw(s) failed")
             or nil
     end
 
@@ -2275,8 +2517,8 @@ local function drawNKMSourceModelNormalBuffer(viewSetup)
         end
     end
 
-    if not ok then return false, tostring(err), drawnModels end
-    return true, nil, drawnModels
+    if not ok then return false, tostring(err), bumpDraws end
+    return true, nil, bumpDraws
 end
 
 local function drawNKMDecodedSourceModelNormalBuffer()
@@ -2901,7 +3143,7 @@ hook.Add("HUDPaint", "NKM.GShaderSourceModelNormalDebug", function()
     surface.DrawRect(panelX, panelY, panelWidth, panelHeight)
     surface.SetDrawColor(90, 145, 190, 230)
     surface.DrawOutlinedRect(panelX, panelY, panelWidth, panelHeight, 1)
-    draw.SimpleText("SOURCE MODEL NORMAL CAPTURE", "DermaDefaultBold",
+    draw.SimpleText("SOURCE MODEL NORMAL-MAP CAPTURE", "DermaDefaultBold",
         panelX + 10, panelY + 8, color_white)
 
     local previews = {
@@ -3881,14 +4123,14 @@ concommand.Add("nkm_lighting_status", function()
         .. "; strength=" .. string.format("%.2f", math.Clamp(
             NKM_GShaderSourceNormalSmoothingConVar:GetFloat(), 0, 1)))
     local modelNormalShaderReady = false
-    if NKM_GShaderSourceModelNormalMaterial then
-        local ok, isError = pcall(NKM_GShaderSourceModelNormalMaterial.IsError, NKM_GShaderSourceModelNormalMaterial)
+    if NKM_GShaderSourceModelBumpMaterial then
+        local ok, isError = pcall(NKM_GShaderSourceModelBumpMaterial.IsError, NKM_GShaderSourceModelBumpMaterial)
         modelNormalShaderReady = ok and not isError
     end
     print("[NKM] Source model normals: enabled=" .. tostring(NKM_GShaderSourceModelNormalsConVar:GetBool())
         .. "; shaderCompiled=" .. tostring(modelNormalShaderReady)
         .. "; passReady=" .. tostring(NKM.GShaderSourceModelNormalPassReady == true)
-        .. "; entitiesDrawn=" .. tostring(NKM.GShaderSourceModelNormalDraws or 0)
+        .. "; bumpMaterialDraws=" .. tostring(NKM.GShaderSourceModelNormalDraws or 0)
         .. (NKM.GShaderSourceModelNormalLastError and ("; error=" .. tostring(NKM.GShaderSourceModelNormalLastError)) or ""))
     if NKM.GShaderEntityLastError then
         print("[NKM] Source normal filter error: " .. tostring(NKM.GShaderEntityLastError))
@@ -3998,16 +4240,16 @@ concommand.Add("nkm_gshader_status", function()
     print("[NKM] Deferred shader material: " .. tostring(material ~= nil))
     print("[NKM] LUT uploaded: " .. tostring(NKM.GShaderLUTGeneration == NKM.ClientGeneration))
     local sourceModelNormalShaderReady = false
-    if NKM_GShaderSourceModelNormalMaterial then
+    if NKM_GShaderSourceModelBumpMaterial then
         local shaderOK, isError = pcall(
-            NKM_GShaderSourceModelNormalMaterial.IsError,
-            NKM_GShaderSourceModelNormalMaterial)
+            NKM_GShaderSourceModelBumpMaterial.IsError,
+            NKM_GShaderSourceModelBumpMaterial)
         sourceModelNormalShaderReady = shaderOK and not isError
     end
     print("[NKM] Source model normals: enabled=" .. tostring(NKM_GShaderSourceModelNormalsConVar:GetBool())
         .. "; shaderCompiled=" .. tostring(sourceModelNormalShaderReady)
         .. "; passReady=" .. tostring(NKM.GShaderSourceModelNormalPassReady == true)
-        .. "; entitiesDrawn=" .. tostring(NKM.GShaderSourceModelNormalDraws or 0)
+        .. "; bumpMaterialDraws=" .. tostring(NKM.GShaderSourceModelNormalDraws or 0)
         .. "; debugPanel=" .. tostring(NKM_GShaderSourceModelNormalsDebugConVar:GetBool())
         .. "; decodedDebugBuffer=" .. tostring(NKM_GShaderSourceModelNormalDecodedRT ~= nil)
         .. (NKM.GShaderSourceModelNormalLastError

@@ -6,7 +6,7 @@
 sampler SourceWorldPosBuffer : register(s0); // GShader _rt_WPDepth
 sampler NKMWorldPosBuffer    : register(s1); // NKM _rt_NKM_WPDepth
 sampler SourceNormalBuffer   : register(s2); // GShader _rt_NormalsTangents
-sampler SourceModelNormalBuffer : register(s3); // Interpolated, skinned Source entity vertex normals
+sampler SourceModelNormalBuffer : register(s3); // Per-material tangent-space bump maps converted to world normals
 
 const float4 SmoothingParams : register(c0); // x=strength, y=relative depth tolerance, z=min normal dot, w=center weight
 const float4 ModelNormalParams : register(c1); // x=1 only when model-normal capture succeeded this frame
@@ -154,9 +154,9 @@ float4 main(PS_INPUT input) : COLOR0
     float3 centerNormal = hasInterpolatedModelNormal
         ? DecodeSourceNormal(modelNormalSample.rg)
         : DecodeSourceNormal(sourceNormal.rg);
-    // Original vertex normals are already interpolated across the model surface.
-    // Do not blur them again; retain the edge-aware screen-space filter only as
-    // a fallback for BSP/static props and other geometry not captured as entities.
+    // Captured bump-map normals already contain the material's fine surface detail.
+    // Do not blur them; retain the edge-aware screen-space reconstruction only as
+    // the fallback for materials without a usable $bumpmap.
     float3 smoothedNormal = hasInterpolatedModelNormal
         ? centerNormal
         : SmoothSourceNormal(uv, sourcePositionDepth, centerNormal);
